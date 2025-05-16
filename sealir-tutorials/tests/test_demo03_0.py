@@ -45,8 +45,8 @@ def test_extraction_result():
         source.strip()
         == """
 def func(arg1, arg2, arg3, arg4):
-    v4 = (arg2 @ arg3); v6 = (v4 @ arg4); v7 = (v4 @ v6); v8 = (arg1 @ v7)
-    return v8
+    v5 = (arg3 @ arg4); v6 = (arg2 @ v5); v7 = (arg3 @ v6); v8 = (arg2 @ v7); v9 = (arg1 @ v8)
+    return v9
 """.strip()
     )
 

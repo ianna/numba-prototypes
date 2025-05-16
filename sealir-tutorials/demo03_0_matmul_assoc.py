@@ -185,7 +185,6 @@ def ruleset_optimize_matmul(
         union(ary2).with_(
             MatMul_KnownShape(ary0, ary1, shapeM, shapeN, shapeK)
         ),
-        subsume(stmt),
     )
 
 
@@ -240,6 +239,8 @@ class MyCostModel(_ch05_CostModel):
                     lambda lhs, rhs, *_, m, n, k: 2 * m * n * k,
                     constants=dict(m=m, n=n, k=k),
                 )
+            case "MatMul", _:
+                return self.get_simple(float("inf"))
         return super().get_cost_function(nodename, op, ty, cost, children)
 
 
@@ -341,8 +342,11 @@ if __name__ == "__main__":
     res0 = f1(arr0, arr1, arr2, arr3)
     np.testing.assert_allclose(res0, res1)
 
+    # original
     # %timeit f0(arr0, arr1, arr2, arr3)
 
+    # manual optimized
     # %timeit f1(arr0, arr1, arr2, arr3)
 
+    # cost-based extraction
     # %timeit extracted(arr0, arr1, arr2, arr3)
