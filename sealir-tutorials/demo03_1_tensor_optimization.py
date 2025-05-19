@@ -1,13 +1,10 @@
 import numpy as np
 from egglog import (
     EGraph,
-    Expr,
     String,
-    StringLike,
     Vec,
     function,
     i64,
-    i64Like,
     rewrite,
     rule,
     ruleset,
@@ -15,15 +12,11 @@ from egglog import (
     subsume,
     union,
 )
-from sealir import ase, rvsdg
+from sealir import ase
 from sealir.eqsat.py_eqsat import (
     Py_AddIO,
-    Py_AttrIO,
     Py_Call,
-    Py_DivIO,
     Py_LoadGlobal,
-    Py_MulIO,
-    Py_PowIO,
 )
 from sealir.eqsat.rvsdg_convert import egraph_conversion
 from sealir.eqsat.rvsdg_eqsat import GraphRoot, Term, TermList
@@ -70,18 +63,6 @@ from demo03_0_matmul_assoc import (
     ruleset_optimize_matmul,
 )
 
-# Set seed for reproducibility
-np.random.seed(0)
-
-M = 1024
-N = 256
-K = 256
-
-input_1 = np.random.randn(M, N)
-input_2 = np.random.randn(M, N)
-input_3 = np.random.randn(N, K)
-input_4 = np.random.randn(N, K)
-
 # --- Original version ---
 # Two separate matmuls followed by elementwise add
 
@@ -91,8 +72,6 @@ def original_mma(input_1, input_2, input_3, input_4):
     out2 = np.matmul(input_2, input_4)
     return out1 + out2
 
-
-original = original_mma(input_1, input_2, input_3, input_4)
 
 # --- Optimized version ---
 # Concatenate inputs along feature dimensions
@@ -104,10 +83,28 @@ def optimized_mma(input_1, input_2, input_3, input_4):
     return np.matmul(concat_input, concat_weight)
 
 
-optimized = optimized_mma(input_1, input_2, input_3, input_4)
-# --- Comparison ---
-print("Max absolute difference:", np.max(np.abs(original - optimized)))
-print("Are they close?", np.allclose(original, optimized, atol=1e-6))
+M = 1024
+N = 256
+K = 256
+
+
+np.random.seed(0)
+
+
+input_1 = np.random.randn(M, N)
+input_2 = np.random.randn(M, N)
+input_3 = np.random.randn(N, K)
+input_4 = np.random.randn(N, K)
+
+
+if __name__ == "__main__":
+    # Set seed for reproducibility
+
+    original = original_mma(input_1, input_2, input_3, input_4)
+    optimized = optimized_mma(input_1, input_2, input_3, input_4)
+    # --- Comparison ---
+    print("Max absolute difference:", np.max(np.abs(original - optimized)))
+    print("Are they close?", np.allclose(original, optimized, atol=1e-6))
 
 
 # ===============================
@@ -419,41 +416,39 @@ array_1_desc, array_1_infos = array_desc_rules(
 ruleset_array_facts = ruleset(*array_0_infos, *array_1_infos)
 
 
-rvsdg_expr, _dbginfo = frontend(original_mma)
-print(format_rvsdg(rvsdg_expr))
-memo = egraph_conversion(rvsdg_expr)
-root = GraphRoot(memo[rvsdg_expr])
-eg = EGraph()
-eg.let("root", root)
-eg.run(
-    (
-        ruleset_array_facts
-        | setup_argtypes(
-            array_0_desc.toType(),
-            array_0_desc.toType(),
-            array_1_desc.toType(),
-            array_1_desc.toType(),
-        )
-        | base_ruleset
-        | ruleset_module
-        | facts_numpy_module
-        | ruleset_numpy_add
-        | ruleset_broadcasting
-        | ruleset_optimize_matmul
-        | ruleset_tensat
-        | ruleset_specialize_numpy
-    ).saturate()
-)
-print(eg.extract(root))
-# eg.display()
-
-cost, out_expr = egraph_extraction(
-    egraph=eg,
-    rvsdg_sexpr=rvsdg_expr,
-    cost_model=MyCostModel(),
-    converter_class=MyEGraphToRVSDG,
-)
-print(format_rvsdg(out_expr))
+if __name__ == "__main__":
+    rvsdg_expr, _dbginfo = frontend(original_mma)
+    print(format_rvsdg(rvsdg_expr))
+    memo = egraph_conversion(rvsdg_expr)
+    root = GraphRoot(memo[rvsdg_expr])
+    eg = EGraph()
+    eg.let("root", root)
+    eg.run(
+        (
+            ruleset_array_facts
+            | setup_argtypes(
+                array_0_desc.toType(),
+                array_0_desc.toType(),
+                array_1_desc.toType(),
+                array_1_desc.toType(),
+            )
+            | base_ruleset
+            | ruleset_module
+            | facts_numpy_module
+            | ruleset_numpy_add
+            | ruleset_broadcasting
+            | ruleset_optimize_matmul
+            | ruleset_tensat
+            | ruleset_specialize_numpy
+        ).saturate()
+    )
+    cost, out_expr = egraph_extraction(
+        egraph=eg,
+        rvsdg_sexpr=rvsdg_expr,
+        cost_model=MyCostModel(),
+        converter_class=MyEGraphToRVSDG,
+    )
+    print(format_rvsdg(out_expr))
 
 
 class SourceMaker(_demo03_0_SourceMaker):
@@ -473,18 +468,18 @@ class SourceMaker(_demo03_0_SourceMaker):
                 return super().visit(expr)
 
 
-visitor = SourceMaker()
-outports = out_expr.body.ports
-[out_equ] = [p.value for p in outports if p.name == "!ret"]
-ase.apply_bottomup(out_equ, visitor)
+if __name__ == "__main__":
+    visitor = SourceMaker()
+    outports = out_expr.body.ports
+    [out_equ] = [p.value for p in outports if p.name == "!ret"]
+    ase.apply_bottomup(out_equ, visitor)
 
-print(visitor.get_source())
-extracted = visitor.get_function(global_ns={"np": np})
+    print(visitor.get_source())
+    extracted = visitor.get_function(global_ns={"np": np})
 
-got = extracted(input_1, input_2, input_3, input_4)
-np.testing.assert_allclose(original, got)
+    got = extracted(input_1, input_2, input_3, input_4)
+    np.testing.assert_allclose(original, got)
 
-
-# %timeit original_mma(input_1, input_2, input_3, input_4)
-# %timeit optimized_mma(input_1, input_2, input_3, input_4)
-# %timeit extracted(input_1, input_2, input_3, input_4)
+    # %timeit original_mma(input_1, input_2, input_3, input_4)
+    # %timeit optimized_mma(input_1, input_2, input_3, input_4)
+    # %timeit extracted(input_1, input_2, input_3, input_4)
