@@ -88,17 +88,14 @@ N = 256
 K = 256
 
 
-np.random.seed(0)
-
-
-input_1 = np.random.randn(M, N)
-input_2 = np.random.randn(M, N)
-input_3 = np.random.randn(N, K)
-input_4 = np.random.randn(N, K)
-
-
 if __name__ == "__main__":
     # Set seed for reproducibility
+    np.random.seed(0)
+
+    input_1 = np.random.randn(M, N)
+    input_2 = np.random.randn(M, N)
+    input_3 = np.random.randn(N, K)
+    input_4 = np.random.randn(N, K)
 
     original = original_mma(input_1, input_2, input_3, input_4)
     optimized = optimized_mma(input_1, input_2, input_3, input_4)
@@ -333,6 +330,7 @@ class NbOp_Npy_HStack(NbOp_Base):
 class NbOp_Npy_HStack_KnownShape(NbOp_Base):
     lhs: SExpr
     rhs: SExpr
+    # m x n output
     m: int
     n: int
 
@@ -345,6 +343,7 @@ class NbOp_Npy_VStack(NbOp_Base):
 class NbOp_Npy_VStack_KnownShape(NbOp_Base):
     lhs: SExpr
     rhs: SExpr
+    # m x n output
     m: int
     n: int
 
