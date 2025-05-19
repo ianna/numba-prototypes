@@ -323,11 +323,10 @@ def func({', '.join(args)}):
 """
         return template
 
-    def get_function(self):
+    def get_function(self, global_ns={}):
         source_code = self.get_source()
-        g = {}
-        exec(source_code, g)
-        return g["func"]
+        exec(source_code, global_ns)
+        return global_ns["func"]
 
 
 if __name__ == "__main__":

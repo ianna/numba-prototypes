@@ -15,7 +15,7 @@ from egglog import (
     subsume,
     union,
 )
-from sealir import rvsdg
+from sealir import ase, rvsdg
 from sealir.eqsat.py_eqsat import (
     Py_AddIO,
     Py_AttrIO,
@@ -64,16 +64,23 @@ from demo03_0_matmul_assoc import (
     NbOp_Base,
     NbOp_MatMulKnownShape,
     SExpr,
+)
+from demo03_0_matmul_assoc import SourceMaker as _demo03_0_SourceMaker
+from demo03_0_matmul_assoc import (
     ruleset_optimize_matmul,
 )
 
 # Set seed for reproducibility
 np.random.seed(0)
 
-input_1 = np.random.randn(4, 3)
-input_2 = np.random.randn(4, 3)
-input_3 = np.random.randn(3, 5)
-input_4 = np.random.randn(3, 5)
+M = 1024
+N = 256
+K = 256
+
+input_1 = np.random.randn(M, N)
+input_2 = np.random.randn(M, N)
+input_3 = np.random.randn(N, K)
+input_4 = np.random.randn(N, K)
 
 # --- Original version ---
 # Two separate matmuls followed by elementwise add
@@ -403,10 +410,6 @@ class MyEGraphToRVSDG(ExtendEGraphToRVSDG):
 
 # ===============================
 
-M = 400
-N = 30
-K = 50
-
 array_0_desc, array_0_infos = array_desc_rules(
     "array_0", shape=(M, N), dtype=TypeFloat64, layout="c"
 )
@@ -451,3 +454,37 @@ cost, out_expr = egraph_extraction(
     converter_class=MyEGraphToRVSDG,
 )
 print(format_rvsdg(out_expr))
+
+
+class SourceMaker(_demo03_0_SourceMaker):
+    def visit(self, expr: SExpr):
+        memo = self.memo
+        buf = self.out
+        match expr:
+            case NbOp_Npy_HStack_KnownShape(lhs=lhs, rhs=rhs, m=m, n=n):
+                lhs, rhs = memo[lhs], memo[rhs]
+                memo[expr] = ref = f"v{len(memo)}"
+                buf.append(f"{ref} = np.hstack(({lhs}, {rhs}))")
+            case NbOp_Npy_VStack_KnownShape(lhs=lhs, rhs=rhs, m=m, n=n):
+                lhs, rhs = memo[lhs], memo[rhs]
+                memo[expr] = ref = f"v{len(memo)}"
+                buf.append(f"{ref} = np.vstack(({lhs}, {rhs}))")
+            case _:
+                return super().visit(expr)
+
+
+visitor = SourceMaker()
+outports = out_expr.body.ports
+[out_equ] = [p.value for p in outports if p.name == "!ret"]
+ase.apply_bottomup(out_equ, visitor)
+
+print(visitor.get_source())
+extracted = visitor.get_function(global_ns={"np": np})
+
+got = extracted(input_1, input_2, input_3, input_4)
+np.testing.assert_allclose(original, got)
+
+
+# %timeit original_mma(input_1, input_2, input_3, input_4)
+# %timeit optimized_mma(input_1, input_2, input_3, input_4)
+# %timeit extracted(input_1, input_2, input_3, input_4)
