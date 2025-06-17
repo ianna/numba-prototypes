@@ -63,6 +63,9 @@ from ch04_1_typeinfer_ifelse import (
 )
 from ch04_2_typeinfer_loops import Backend as _ch04_2_Backend
 from ch04_2_typeinfer_loops import (
+    Compiler,
+)
+from ch04_2_typeinfer_loops import (
     ExtendEGraphToRVSDG as _ch04_2_ExtendEGraphToRVSDG,
 )
 from ch04_2_typeinfer_loops import (
@@ -74,7 +77,6 @@ from ch04_2_typeinfer_loops import (
     TypeInt64,
     TypeVar,
     base_ruleset,
-    compiler_pipeline,
     setup_argtypes,
 )
 from utils import IN_NOTEBOOK
@@ -402,9 +404,11 @@ array_int64_1d, array_infos = array_desc_rules(
     "array_int64_1d", shape=("n",), dtype=TypeInt64, layout="c"
 )
 
+compiler = Compiler(ExtendEGraphToRVSDG, Backend(), MyCostModel(), True)
+
 if __name__ == "__main__":
     # compile
-    jt = compiler_pipeline(
+    llvm_module, func_egraph = compiler.lower_py_fn(
         example_1,
         argtypes=(array_1d_symbolic, Int64),
         ruleset=(
@@ -413,11 +417,8 @@ if __name__ == "__main__":
             | ruleset(*array_infos)
             | ruleset_typeinfer_array_getitem
         ),
-        verbose=True,
-        converter_class=ExtendEGraphToRVSDG,
-        cost_model=MyCostModel(),
-        backend=Backend(),
     )
+    jit_func = compiler.compile_module(llvm_module, func_egraph)
     # create array
     ary = np.arange(10, dtype=np.int64)
     # prepare array for passing to C-API
@@ -425,7 +426,7 @@ if __name__ == "__main__":
     param_ary.ptr = ary.ctypes.data
     param_ary.shape[0] = ary.shape[0]
     # call the compiled function
-    got = jt(ctypes.byref(param_ary), 3)
+    got = jit_func(ctypes.byref(param_ary), 3)
     print("got", got)
     # compare the result
     expect = example_1(ary, 3)
@@ -447,7 +448,7 @@ def example_2(ary, size):
 
 
 if __name__ == "__main__":
-    jt = compiler_pipeline(
+    llvm_module, func_egraph = compiler.lower_py_fn(
         example_2,
         argtypes=(array_1d_symbolic, Int64),
         ruleset=(
@@ -456,17 +457,15 @@ if __name__ == "__main__":
             | ruleset(*array_infos)
             | ruleset_typeinfer_array_getitem
         ),
-        verbose=True,
-        converter_class=ExtendEGraphToRVSDG,
-        cost_model=MyCostModel(),
-        backend=Backend(),
     )
+    jit_func = compiler.compile_module(llvm_module, func_egraph)
+
     ary = np.arange(10, dtype=np.int64)
     param_ary = CtypeInt64Array1D()
     param_ary.ptr = ary.ctypes.data
     param_ary.shape[0] = ary.shape[0]
 
-    got = jt(ctypes.byref(param_ary), ary.size)
+    got = jit_func(ctypes.byref(param_ary), ary.size)
     print("got", got)
     expect = example_2(ary, ary.size)
     assert got == expect

@@ -1,0 +1,35 @@
+name: sealir-tutorial-tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+    - name: Setup Miniconda
+      uses: conda-incubator/setup-miniconda@505e6394dae86d6a5c7fbb6e3fb8938e3e863830 # v3.1.1
+      with:
+        python-version: ${{ matrix.python-version }}
+        miniconda-version: "latest"
+        auto-activate-base: false
+        activate-environment: sealir_tutorial
+        environment-file: sealir-tutorials/conda_environment.yml
+
+    - name: Run tests
+      working-directory: sealir-tutorials
+      run: |
+        source $CONDA/bin/activate
+        conda activate sealir_tutorial
+        conda list
+        make test

@@ -1,6 +1,13 @@
 from sealir import ase
 
+import ch04_0_typeinfer_prelude
 from ch04_0_typeinfer_prelude import *
+
+from .autotests import autotest_notebook
+
+
+def test_ch04_0_autotest():
+    autotest_notebook(ch04_0_typeinfer_prelude)
 
 
 def check(fn, ruleset):

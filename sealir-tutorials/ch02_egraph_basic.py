@@ -42,6 +42,7 @@ from sealir.eqsat.rvsdg_extract import egraph_extraction
 
 # We'll be extending from chapter 1.
 from ch01_basic_compiler import backend, frontend, jit_compile, run_test
+from utils import IN_NOTEBOOK
 
 # ## A simple roundtripping to and from EGraph
 #
@@ -71,7 +72,8 @@ if __name__ == "__main__":
 
     egraph = EGraph()
     egraph.let("root", GraphRoot(func))
-    egraph.display(graphviz=True)
+    if IN_NOTEBOOK:
+        egraph.display(graphviz=True)
 
 # ### Extract from EGraph
 #
@@ -128,7 +130,7 @@ def compiler_pipeline(fn, *, verbose=False):
         # the encoding into and out of egraph.
         root = GraphRoot(func)
         egraph.let("root", root)
-        if verbose:
+        if verbose and IN_NOTEBOOK:
             # For inspecting the egraph
             egraph.display(graphviz=True)
 

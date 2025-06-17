@@ -33,6 +33,7 @@ from ch02_egraph_basic import (
     middle_end,
     run_test,
 )
+from utils import IN_NOTEBOOK
 
 # Next, we’ll explore a new compiler pipeline designed with customizable rulesets. To enable this flexibility, we’ve introduced a `ruleset` argument, allowing you to tailor the pipeline’s behavior to your specific needs.
 
@@ -47,7 +48,7 @@ def compiler_pipeline(fn, *, verbose=False, ruleset):
         root = GraphRoot(func)
         egraph.let("root", root)
         egraph.run(ruleset.saturate())
-        if verbose:
+        if verbose and IN_NOTEBOOK:
             # For inspecting the egraph
             egraph.display(graphviz=True)
 

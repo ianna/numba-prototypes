@@ -487,74 +487,111 @@ class CompilationError(Exception):
     pass
 
 
-def compiler_pipeline(
-    fn,
-    argtypes,
-    *,
-    verbose=False,
-    ruleset: Ruleset,
-    converter_class=EGraphToRVSDG,
-    cost_model=None,
-    backend,
-):
+@dataclass
+class Compiler:
+    converter_class: Backend
+    backend: int
+    cost_model: CostModel
+    verbose: EGraphToRVSDG
 
-    rvsdg_expr, dbginfo = frontend(fn)
+    def run_frontend(self, fn):
+        rvsdg_expr, dbginfo = frontend(fn)
+        return rvsdg_expr, dbginfo
 
-    print("Before EGraph".center(80, "="))
-    print(format_rvsdg(rvsdg_expr))
+    def run_middle_end(self, rvsdg_expr, ruleset):
 
-    # Middle end
-    def define_egraph(
-        egraph: EGraph,
-        func: SExpr,
+        # Middle end
+        def define_egraph(
+            egraph: EGraph,
+            func: SExpr,
+        ):
+            # Define graph root that points to the function
+            root = GraphRoot(func)
+            egraph.let("root", root)
+
+            # Define the empty root node for the error messages
+            errors = ErrorMsg.root()
+            egraph.let("errors", errors)
+
+            # Run all the rules until saturation
+            egraph.run(ruleset.saturate())
+
+            if self.verbose and IN_NOTEBOOK:
+                # For inspecting the egraph
+                egraph.display(graphviz=True)
+            print(egraph.extract(root))
+            # Use egglog's default extractor to get the error messages
+            errmsgs = map(
+                lambda x: x.eval(), egraph.extract_multiple(errors, n=10)
+            )
+            errmsgs_filtered = [
+                get_error_message((meth, args))
+                for meth, args in errmsgs
+                if meth != "root"
+            ]
+            if errmsgs_filtered:
+                # Raise CompilationError if there are compiler errors
+                raise CompilationError("\n".join(errmsgs_filtered))
+
+        try:
+            cost, extracted = middle_end(
+                rvsdg_expr,
+                define_egraph,
+                converter_class=self.converter_class,
+                cost_model=self.cost_model,
+            )
+        except ExtractionError as e:
+            raise CompilationError("extraction failed") from e
+
+        return cost, extracted
+
+    def run_backend(self, extracted, argtypes):
+        return self.backend.lower(extracted, argtypes)
+
+    def lower_py_fn(self, fn, argtypes, ruleset):
+
+        rvsdg_expr, dbginfo = self.run_frontend(fn)
+
+        print("Before EGraph".center(80, "="))
+        print(format_rvsdg(rvsdg_expr))
+
+        cost, extracted = self.run_middle_end(rvsdg_expr, ruleset)
+
+        print("Extracted from EGraph".center(80, "="))
+        print("cost =", cost)
+        print(format_rvsdg(extracted))
+
+        module = self.run_backend(extracted, argtypes)
+
+        if self.verbose:
+            print("LLVM module".center(80, "="))
+            print(module)
+
+        return module, extracted
+
+    def run_backend_passes(self, module):
+        self.backend.run_passes(module)
+
+    def compile_module(self, module, egraph_node, func_name="func"):
+        return self.backend.jit_compile(module, egraph_node, func_name)
+
+    def compile_module_(
+        self,
+        llmod,
+        input_types,
+        output_types,
+        function_name="func",
+        exec_engine=None,
+        **execution_engine_params,
     ):
-        # Define graph root that points to the function
-        root = GraphRoot(func)
-        egraph.let("root", root)
-
-        # Define the empty root node for the error messages
-        errors = ErrorMsg.root()
-        egraph.let("errors", errors)
-
-        # Run all the rules until saturation
-        egraph.run(ruleset.saturate())
-
-        if verbose and IN_NOTEBOOK:
-            # For inspecting the egraph
-            egraph.display(graphviz=True)
-        print(egraph.extract(root))
-        # Use egglog's default extractor to get the error messages
-        errmsgs = map(
-            lambda x: x.eval(), egraph.extract_multiple(errors, n=10)
+        return self.backend.jit_compile_(
+            llmod,
+            input_types,
+            output_types,
+            function_name,
+            exec_engine,
+            **execution_engine_params,
         )
-        errmsgs_filtered = [
-            get_error_message((meth, args))
-            for meth, args in errmsgs
-            if meth != "root"
-        ]
-        if errmsgs_filtered:
-            # Raise CompilationError if there are compiler errors
-            raise CompilationError("\n".join(errmsgs_filtered))
-
-    try:
-        cost, extracted = middle_end(
-            rvsdg_expr,
-            define_egraph,
-            converter_class=converter_class,
-            cost_model=cost_model,
-        )
-    except ExtractionError as e:
-        raise CompilationError("extraction failed") from e
-
-    print("Extracted from EGraph".center(80, "="))
-    print("cost =", cost)
-    print(format_rvsdg(extracted))
-
-    llmod = backend.lower(extracted, argtypes)
-    if verbose:
-        print("LLVM module".center(80, "="))
-        print(llmod)
-    return backend.jit_compile(llmod, extracted)
 
 
 # + [markdown] jp-MarkdownHeadingCollapsed=true
@@ -1237,7 +1274,7 @@ class Backend:
 
         raise NotImplementedError(expr)
 
-    def jit_compile(self, llmod: ir.Module, func_node: rg.Func):
+    def jit_compile(self, llmod: ir.Module, func_node: rg.Func, func_name):
         sym = func_node.fname
         # Create JIT
         lljit = llvm.create_lljit_compiler()
@@ -1265,6 +1302,9 @@ class Backend:
             case ir.DoubleType():
                 return ctypes.c_double
         raise NotImplementedError(lltype)
+
+    def run_passes(self, module, passes):
+        pass
 
 
 # -
@@ -1317,20 +1357,23 @@ def example_1(a, b):
     return z + a
 
 
+compiler = Compiler(
+    ExtendEGraphToRVSDG, Backend(), MyCostModel(), verbose=True
+)
+
 if __name__ == "__main__":
-    jt = compiler_pipeline(
+    llvm_module, func_egraph = compiler.lower_py_fn(
         example_1,
         argtypes=(Int64, Int64),
         ruleset=(base_ruleset | setup_argtypes(TypeInt64, TypeInt64)),
-        verbose=True,
-        converter_class=ExtendEGraphToRVSDG,
-        cost_model=MyCostModel(),
-        backend=Backend(),
     )
+
+    jit_func = compiler.compile_module(llvm_module, func_egraph)
+
     args = (10, 33)
-    run_test(example_1, jt, args, verbose=True)
+    run_test(example_1, jit_func, args, verbose=True)
     args = (7, 3)
-    run_test(example_1, jt, args, verbose=True)
+    run_test(example_1, jit_func, args, verbose=True)
 
 
 # ## Example 2: add `float()`
@@ -1372,7 +1415,7 @@ def ruleset_type_infer_float(
 
 
 if __name__ == "__main__":
-    jt = compiler_pipeline(
+    llvm_module, func_egraph = compiler.lower_py_fn(
         example_2,
         argtypes=(Int64, Int64),
         ruleset=(
@@ -1380,15 +1423,12 @@ if __name__ == "__main__":
             | setup_argtypes(TypeInt64, TypeInt64)
             | ruleset_type_infer_float  # < --- added for float()
         ),
-        verbose=True,
-        converter_class=ExtendEGraphToRVSDG,
-        cost_model=MyCostModel(),
-        backend=Backend(),
     )
+    jit_func = compiler.compile_module(llvm_module, func_egraph)
     args = (10, 33)
-    run_test(example_2, jt, args, verbose=True)
+    run_test(example_2, jit_func, args, verbose=True)
     args = (7, 3)
-    run_test(example_2, jt, args, verbose=True)
+    run_test(example_2, jit_func, args, verbose=True)
 
 # ## Example 3: unify mismatching type
 #
@@ -1417,7 +1457,7 @@ def ruleset_failed_to_unify(ty: Type):
 
 if __name__ == "__main__":
     try:
-        compiler_pipeline(
+        llvm_module, func_egraph = compiler.lower_py_fn(
             example_3,
             argtypes=(Int64, Int64),
             ruleset=(
@@ -1426,10 +1466,6 @@ if __name__ == "__main__":
                 | ruleset_type_infer_float
                 | ruleset_failed_to_unify
             ),
-            verbose=True,
-            converter_class=ExtendEGraphToRVSDG,
-            cost_model=MyCostModel(),
-            backend=Backend(),
         )
     except CompilationError as e:
         # Compilation failed because the return type cannot be determined.
@@ -1476,7 +1512,7 @@ def ruleset_type_infer_failure_report(
 if __name__ == "__main__":
 
     try:
-        compiler_pipeline(
+        llvm_module, func_egraph = compiler.lower_py_fn(
             example_3,
             argtypes=(Int64, Int64),
             ruleset=(
@@ -1486,10 +1522,6 @@ if __name__ == "__main__":
                 | ruleset_failed_to_unify
                 | ruleset_type_infer_failure_report
             ),
-            verbose=True,
-            converter_class=ExtendEGraphToRVSDG,
-            cost_model=MyCostModel(),
-            backend=Backend(),
         )
 
     except CompilationError as e:

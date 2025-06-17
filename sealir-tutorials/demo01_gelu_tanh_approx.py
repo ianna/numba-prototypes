@@ -14,6 +14,8 @@
 
 # import needed modules:
 
+import mlir.dialects.arith as arith
+import mlir.dialects.math as math
 import mlir.ir as ir
 import numpy as np
 from egglog import (
@@ -61,16 +63,16 @@ from ch04_1_typeinfer_ifelse import (
     setup_argtypes,
 )
 from ch05_typeinfer_array import (
+    Compiler,
     ExtendEGraphToRVSDG,
 )
 from ch05_typeinfer_array import MyCostModel as ch06_CostModel
 from ch05_typeinfer_array import (
-    NbOp_Type,
     base_ruleset,
-    compiler_pipeline,
 )
-from ch06_mlir_backend import Backend as ch06_Backend
 from ch06_mlir_backend import LowerStates, run_test
+from ch07_mlir_ufunc import Backend as UfuncBackend
+from ch07_mlir_ufunc import Float32, TypeFloat32, ufunc_vectorize
 
 # ## The GELU function
 
@@ -264,11 +266,6 @@ additional_rules = (
 
 # ### Extend the RVSDG Grammar
 
-# +
-TypeFloat32 = Type.simple("Float32")
-
-Float32 = NbOp_Type("Float32")
-
 SExpr = rvsdg.grammar.SExpr
 
 
@@ -357,7 +354,7 @@ class ExtendEGraphToRVSDG(ch04_1_ExtendEGraphToRVSDG):
 # ### Extend the backend
 
 
-class Backend(ch06_Backend):
+class Backend(UfuncBackend):
     def __init__(self):
         super().__init__()
         self.f32 = ir.F32Type.get(context=self.context)
@@ -369,9 +366,6 @@ class Backend(ch06_Backend):
         return super().get_mlir_type(seal_ty)
 
     def lower_expr(self, expr: SExpr, state: LowerStates):
-        import mlir.dialects.arith as arith
-        import mlir.dialects.math as math
-
         match expr:
             case NbOp_Add_Float32(lhs, rhs):
                 lhs = yield lhs
@@ -405,18 +399,6 @@ class Backend(ch06_Backend):
                 return arith.constant(self.i32, 0)
         return (yield from super().lower_expr(expr, state))
 
-    def run_passes(self, module, context):
-        import mlir.passmanager as passmanager
-
-        pass_man = passmanager.PassManager(context=context)
-        pass_man.add("convert-scf-to-cf")
-        pass_man.add("convert-math-to-libm")
-        pass_man.add("convert-func-to-llvm")
-        pass_man.enable_verifier(True)
-        pass_man.run(module.operation)
-        module.dump()
-        return module
-
 
 # ## Cost Model
 #
@@ -440,21 +422,19 @@ class MyCostModel(ch06_CostModel):
 
 
 # ### Run the baseline function
+compiler = Compiler(ExtendEGraphToRVSDG, Backend(), MyCostModel(), True)
 
 if __name__ == "__main__":
-    jt = compiler_pipeline(
+    llvm_module, func_egraph = compiler.lower_py_fn(
         gelu_tanh_forward,
         argtypes=(Float32,),
         ruleset=(
             base_ruleset | setup_argtypes(TypeFloat32) | additional_rules
         ),
-        verbose=True,
-        converter_class=ExtendEGraphToRVSDG,
-        cost_model=MyCostModel(),
-        backend=Backend(),
     )
-    run_test(gelu_tanh_forward, jt, (0.234,), verbose=True)
-
+    compiler.run_backend_passes(llvm_module)
+    jit_func = compiler.compile_module(llvm_module, func_egraph)
+    run_test(gelu_tanh_forward, jit_func, (0.234,), verbose=True)
 
 # ## Add rules to optimize
 
@@ -502,7 +482,7 @@ optimize_rules = pade44_tanh_expansion | pow_expansion
 # ### Run the optimized function
 
 if __name__ == "__main__":
-    jt = compiler_pipeline(
+    llvm_module, func_egraph = compiler.lower_py_fn(
         gelu_tanh_forward,
         argtypes=(Float32,),
         ruleset=(
@@ -511,11 +491,10 @@ if __name__ == "__main__":
             | additional_rules
             | optimize_rules
         ),
-        verbose=True,
-        converter_class=ExtendEGraphToRVSDG,
-        cost_model=MyCostModel(),
-        backend=Backend(),
     )
+    compiler.run_backend_passes(llvm_module)
+    jit_func = compiler.compile_module(llvm_module, func_egraph)
+
 
 # ### Compare the result
 #
@@ -524,4 +503,18 @@ if __name__ == "__main__":
 
 if __name__ == "__main__":
     relclose = lambda x, y: np.allclose(x, y, rtol=1e-6)
-    run_test(gelu_tanh_forward, jt, (0.234,), equal=relclose)
+    run_test(gelu_tanh_forward, jit_func, (0.234,), equal=relclose)
+
+
+# ### Ufunc version
+
+if __name__ == "__main__":
+    vectorized_gelu = ufunc_vectorize(
+        input_type=Float32,
+        ndim=1,
+        ufunc_compiler=compiler,
+        extra_ruleset=additional_rules,
+    )(gelu_tanh_forward)
+    relclose = lambda x, y: np.allclose(x, y, rtol=1e-6)
+    input_val = np.random.random(100).astype(np.float32)
+    run_test(gelu_tanh_forward, vectorized_gelu, (input_val,), equal=relclose)

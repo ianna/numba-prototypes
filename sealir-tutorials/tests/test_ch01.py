@@ -1,26 +1,7 @@
-from ch01_basic_compiler import *
+import ch01_basic_compiler
+
+from .autotests import autotest_notebook
 
 
-def test_ch01_sum_ints():
-    def sum_ints(n):
-        c = 0
-        for i in range(n):
-            c += i
-        return c
-
-    jt = compiler_pipeline(sum_ints)
-    run_test(sum_ints, jt, (12,))
-
-
-def test_ch01_max_two():
-    def max_if_else(x, y):
-        if x > y:
-            return x
-        else:
-            return y
-
-    jt = compiler_pipeline(max_if_else)
-    args = (1, 2)
-    run_test(max_if_else, jt, args)
-    args = (3, 2)
-    run_test(max_if_else, jt, args)
+def test_ch01_autotest():
+    autotest_notebook(ch01_basic_compiler)

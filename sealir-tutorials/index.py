@@ -26,11 +26,12 @@
 #   - [Part 1 - Fully typing a scalar function with if-else branch](ch04_1_typeinfer_ifelse.html)
 #   - [Part 2 - Fully typing a scalar function with loops](ch04_2_typeinfer_loops.html)
 # * [Chapter 5 - Array Type Inference with EGraphs](ch05_typeinfer_array.html)
-# * Chapter 6 - MLIR Backend for Scalar Functions
+# * [Chapter 6 - MLIR Backend for Scalar Functions](ch06_mlir_backend.html)
 # * [Demo 1 - GELU tanh approximation](demo01_gelu_tanh_approx.html)
-# * Chapter 7 - MLIR Backend for Array Functions
-# * Chapter 8 - MLIR Backend for Array Offload to the GPU
-# * Chapter 9 - Whole Program Compiler Driver
+# * [Chapter 7 - MLIR Backend for Array Functions](ch07_mlir_ufunc.html)
+# * [Chapter 8 - MLIR Backend for Array Offload to the GPU](ch08_gpu_offload.html)
+# * [Demo 2 - GELU tanh approximation CUDA offload](demo02_cuda_ufunc.html)
+# * [Chapter 9 - Whole Program Compiler Driver](ch09_whole_program_compiler_driver.html)
 # * Chapter 10 - Tensor Graph Extraction
 # * Chapter 11 - Tensor Optimization
 # * Chapter 12 - Implementing Alternative GEMMS

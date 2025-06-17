@@ -4,25 +4,14 @@ from sealir.eqsat.rvsdg_eqsat import GraphRoot
 from sealir.eqsat.rvsdg_extract import egraph_extraction
 from sealir.rvsdg import grammar as rg
 
+import ch03_egraph_program_rewrites
 from ch03_egraph_program_rewrites import *
 
+from .autotests import autotest_notebook
 
-def test_ch03_ifelse_fold():
-    def ifelse_fold(a, b):
-        c = 0
-        if c:
-            return a
-        else:
-            return b
 
-    my_ruleset = (
-        rvsdg_eqsat.ruleset_rvsdg_basic
-        | ruleset_const_propagate
-        | ruleset_const_fold_if_else
-    )
-
-    jt = compiler_pipeline(ifelse_fold, ruleset=my_ruleset)
-    run_test(ifelse_fold, jt, (12, 34))
+def test_ch03_autotest():
+    autotest_notebook(ch03_egraph_program_rewrites)
 
 
 def test_ch03_ifelse_fold_internal():

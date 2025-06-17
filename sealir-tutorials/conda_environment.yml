@@ -1,7 +1,7 @@
 name: sealir_tutorial
 channels:
-  - defaults
   - conda-forge
+  - defaults
 dependencies:
   - python=3.12
   - llvmlite=0.44.*
@@ -21,3 +21,4 @@ dependencies:
     - egglog
     - numba_rvsdg
     - git+https://github.com/numba/sealir
+    - pytest-xdist
