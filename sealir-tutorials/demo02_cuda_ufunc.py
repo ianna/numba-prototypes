@@ -2,6 +2,7 @@
 #
 # (Depends on Ch.08)
 from numba import cuda
+
 from ch08_gpu_offload import GPUBackend
 from demo01_gelu_tanh_approx import *
 

@@ -192,7 +192,9 @@ if __name__ == "__main__":
             ConditionalExtendGraphtoRVSDG, GPUBackend(), MyCostModel(), True
         )
 
-        @ufunc_vectorize(input_type=Float64, ndim=2, ufunc_compiler=gpu_compiler)
+        @ufunc_vectorize(
+            input_type=Float64, ndim=2, ufunc_compiler=gpu_compiler
+        )
         def foo(a, b, c):
             x = a + 1.0
             y = b - 2.0
