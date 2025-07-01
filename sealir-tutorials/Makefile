@@ -19,10 +19,15 @@ all: $(IPYNB_FILES)
 sync:
 	jupytext --sync *.ipynb
 
-# Run auto formatter
+# Run auto formatter (only tracked files)
 format:
-	isort -l79 --profile black .
-	black -l79 .
+	@echo "Formatting tracked Python files..."
+	@files="$$(git ls-files '*.py' 2>/dev/null || echo '')"; \
+	if [ -n "$$files" ]; then \
+		echo "$$files"; \
+		echo "$$files" | xargs isort -l79 --profile black; \
+		echo "$$files" | xargs black -l79; \
+	fi
 
 pages: $(PAGES_SUBDIR) $(HTML_FILES)
 
