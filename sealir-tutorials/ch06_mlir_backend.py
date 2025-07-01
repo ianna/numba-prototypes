@@ -12,15 +12,27 @@
 #     name: python3
 # ---
 
-# ## Ch 6.
+# # Chapter 6: MLIR Backend
 #
+# This chapter introduces the MLIR backend, which replaces the LLVM backend
+# from previous chapters. MLIR provides a more flexible and extensible
+# framework for compiler optimization and code generation. We show how to
+# lower RVSDG-IR to MLIR dialects and use MLIR's pass infrastructure for
+# optimization.
+#
+# The chapter covers:
+# - How to implement an MLIR backend for RVSDG-IR
+# - How to use MLIR dialects for different abstraction levels
+# - How to apply MLIR passes for optimization
+
+# ## Imports and Setup
 
 from __future__ import annotations
 
 import ctypes
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable, TypedDict
 
 import mlir.dialects.arith as arith
 import mlir.dialects.cf as cf
@@ -40,7 +52,6 @@ from ch03_egraph_program_rewrites import (
 )
 from ch04_1_typeinfer_ifelse import (
     Attributes,
-    Compiler,
 )
 from ch04_1_typeinfer_ifelse import (
     ExtendEGraphToRVSDG as ConditionalExtendGraphtoRVSDG,
@@ -61,6 +72,7 @@ from ch04_1_typeinfer_ifelse import (
     TypeInt64,
 )
 from ch04_1_typeinfer_ifelse import base_ruleset as if_else_ruleset
+from ch04_1_typeinfer_ifelse import jit_compiler as _ch04_1_jit_compiler
 from ch04_1_typeinfer_ifelse import (
     ruleset_type_infer_float,
     setup_argtypes,
@@ -72,7 +84,12 @@ from ch04_2_typeinfer_loops import (
     NbOp_Not_Int64,
 )
 from ch04_2_typeinfer_loops import base_ruleset as loop_ruleset
-from utils import IN_NOTEBOOK
+from utils import IN_NOTEBOOK, Report, display
+
+# ## MLIR Backend Implementation
+#
+# Define the core MLIR backend class that handles type lowering and
+# expression compilation.
 
 _DEBUG = False
 
@@ -98,6 +115,10 @@ class Backend:
         self.boo = ir.IntegerType.get_signless(1, context=context)
 
     def lower_type(self, ty: NbOp_Type):
+        """Type Lowering
+
+        Convert SealIR types to MLIR types for compilation.
+        """
         match ty:
             case NbOp_Type("Int64"):
                 return self.i64
@@ -108,6 +129,11 @@ class Backend:
         raise NotImplementedError(f"unknown type: {ty}")
 
     def lower(self, root: rg.Func, argtypes):
+        """Expression Lowering
+
+        Lower RVSDG expressions to MLIR operations, handling control flow
+        and data flow constructs.
+        """
         context = self.context
         self.loc = loc = ir.Location.unknown(context=context)
         self.module = module = ir.Module.create(loc=loc)
@@ -175,7 +201,12 @@ class Backend:
         return module
 
     def run_passes(self, module):
-        module.dump()
+        """MLIR Pass Pipeline
+
+        Apply MLIR passes for optimization and lowering to LLVM IR.
+        """
+        if _DEBUG:
+            module.dump()
 
         if _DEBUG:
             module.context.enable_multithreading(False)
@@ -194,10 +225,16 @@ class Backend:
         pass_man.enable_verifier(True)
         pass_man.run(module.operation)
         # Output LLVM-dialect MLIR
-        module.dump()
+        if _DEBUG:
+            module.dump()
         return module
 
     def lower_expr(self, expr: SExpr, state: LowerStates):
+        """Expression Lowering Implementation
+
+        Implement the core expression lowering logic for various RVSDG
+        constructs including functions, regions, control flow, and operations.
+        """
         match expr:
             case rg.Func(args=args, body=body):
                 names = {
@@ -394,7 +431,17 @@ class Backend:
             case _:
                 raise NotImplementedError(expr, type(expr))
 
+    # ## JIT Compilation
+    #
+    # Implement JIT compilation for MLIR modules using the MLIR execution
+    # engine.
+
     def jit_compile(self, llmod, func_node: rg.Func, func_name="func"):
+        """JIT Compilation
+
+        Convert the MLIR module into a JIT-callable function using the MLIR
+        execution engine.
+        """
         attributes = Attributes(func_node.body.begin.attrs)
         # Convert SealIR types into MLIR types
         with self.loc:
@@ -409,11 +456,10 @@ class Backend:
                 )
             ),
         )
-        return self.jit_compile_(llmod, input_types, output_types)
+        return self.jit_compile_extra(llmod, input_types, output_types)
 
-    @classmethod
-    def jit_compile_(
-        cls,
+    def jit_compile_extra(
+        self,
         llmod,
         input_types,
         output_types,
@@ -454,24 +500,28 @@ class Backend:
             # the internal execution engine should
             # be C-Type pointers.
             input_exec_ptrs = [
-                cls.get_exec_ptr(ty, val)[0]
+                self.get_exec_ptr(ty, val)[0]
                 for ty, val in zip(input_types, input_args)
             ]
             # Invokes the function that we built, internally calls
             # _mlir_ciface_function_name as a void pointer with the given
             # input pointers, there can only be one resulting pointer
             # appended to the end of all input pointers in the invoke call.
-            res_ptr, res_val = cls.get_exec_ptr(
+            res_ptr, res_val = self.get_exec_ptr(
                 output_types[0], output_args[0]
             )
             engine.invoke(function_name, *input_exec_ptrs, res_ptr)
 
-            return cls.get_out_val(res_ptr, res_val)
+            return self.get_out_val(res_ptr, res_val)
 
         return jit_func
 
     @classmethod
-    def get_exec_ptr(cls, mlir_ty, val):
+    def get_exec_ptr(self, mlir_ty, val):
+        """Get Execution Pointer
+
+        Convert MLIR types to C-types and allocate memory for the value.
+        """
         if isinstance(mlir_ty, ir.IntegerType):
             val = 0 if val is None else val
             ptr = ctypes.pointer(ctypes.c_int64(val))
@@ -510,9 +560,9 @@ class Backend:
             return res_ptr.contents.value
 
 
-# + [markdown] jp-MarkdownHeadingCollapsed=true
-# Example 1: simple if-else
-# -
+# ## Example 1: Simple If-Else
+#
+# Demonstrate the MLIR backend with a simple conditional function.
 
 
 def example_1(a, b):
@@ -523,25 +573,49 @@ def example_1(a, b):
     return z + a
 
 
-compiler = Compiler(
-    ConditionalExtendGraphtoRVSDG, Backend(), MyCostModel(), True
+compiler_config = dict(
+    converter_class=LoopExtendEGraphToRVSDG,
+    backend=Backend(),
+    cost_model=MyCostModel(),
+    verbose=True,
 )
 
+
+class RunBEPassOutput(TypedDict):
+    module: Any
+
+
+def pipeline_run_be_passes(
+    backend, module, pipeline_report=Report.Sink()
+) -> RunBEPassOutput:
+    with pipeline_report.nest("MLIR passes") as report:
+        backend.run_passes(module)
+        report.append("MLIR optimized", module)
+    return dict(module=module)
+
+
+jit_compiler = _ch04_1_jit_compiler.insert(-1, pipeline_run_be_passes)
+
 if __name__ == "__main__":
-    llvm_module, func_egraph = compiler.lower_py_fn(
-        example_1,
+    display(jit_compiler.visualize())
+    report = Report("Pipeline execution report", enable_nested_metadata=True)
+    jit_func = jit_compiler(
+        fn=example_1,
         argtypes=(Int64, Int64),
         ruleset=(if_else_ruleset | setup_argtypes(TypeInt64, TypeInt64)),
-    )
-    compiler.run_backend_passes(llvm_module)
-    jit_func = compiler.compile_module(llvm_module, func_egraph)
+        pipeline_report=report,
+        **compiler_config,
+    ).jit_func
+    report.display()
+
     args = (10, 33)
     run_test(example_1, jit_func, args, verbose=True)
     args = (7, 3)
     run_test(example_1, jit_func, args, verbose=True)
 
-
-# ## Example 2: add `float()`
+# ## Example 2: Float Operations
+#
+# Test the MLIR backend with float operations and type conversion.
 
 
 def example_2(a, b):
@@ -554,25 +628,30 @@ def example_2(a, b):
 
 # Add rules for `float()`
 
-
 if __name__ == "__main__":
-    llvm_module, func_egraph = compiler.lower_py_fn(
-        example_2,
+    report = Report("Pipeline execution report", enable_nested_metadata=True)
+    jit_func = jit_compiler(
+        fn=example_2,
         argtypes=(Int64, Int64),
         ruleset=(
             if_else_ruleset
             | setup_argtypes(TypeInt64, TypeInt64)
             | ruleset_type_infer_float  # < --- added for float()
         ),
-    )
-    compiler.run_backend_passes(llvm_module)
-    jit_func = compiler.compile_module(llvm_module, func_egraph)
+        pipeline_report=report,
+        **compiler_config,
+    ).jit_func
+
+    report.display()
+
     args = (10, 33)
     run_test(example_2, jit_func, args, verbose=True)
     args = (7, 3)
     run_test(example_2, jit_func, args, verbose=True)
 
-# ## Example 3: Simple while loop example
+# ## Example 3: Simple While Loop
+#
+# Demonstrate loop compilation with the MLIR backend.
 
 
 def example_3(init, n):
@@ -584,21 +663,21 @@ def example_3(init, n):
     return c
 
 
-compiler = Compiler(LoopExtendEGraphToRVSDG, Backend(), MyCostModel(), True)
-
 if __name__ == "__main__":
-    llvm_module, func_egraph = compiler.lower_py_fn(
-        example_3,
+    report = Report("Pipeline execution report", enable_nested_metadata=True)
+    jit_func = jit_compiler(
+        fn=example_3,
         argtypes=(Int64, Int64),
-        ruleset=loop_ruleset | setup_argtypes(TypeInt64, TypeInt64),
-    )
-    compiler.run_backend_passes(llvm_module)
-    jit_func = compiler.compile_module(llvm_module, func_egraph)
-
+        ruleset=(loop_ruleset | setup_argtypes(TypeInt64, TypeInt64)),
+        pipeline_report=report,
+        **compiler_config,
+    ).jit_func
+    report.display()
     run_test(example_3, jit_func, (10, 7), verbose=True)
 
-
-# ## Example 4: Nested Loop example
+# ## Example 4: Nested Loop
+#
+# Test nested loop compilation with the MLIR backend.
 
 
 def example_4(init, n):
@@ -614,12 +693,13 @@ def example_4(init, n):
 
 
 if __name__ == "__main__":
-    llvm_module, func_egraph = compiler.lower_py_fn(
-        example_4,
+    report = Report("Pipeline execution report", enable_nested_metadata=True)
+    jit_func = jit_compiler(
+        fn=example_4,
         argtypes=(Int64, Int64),
-        ruleset=loop_ruleset | setup_argtypes(TypeInt64, TypeInt64),
-    )
-    compiler.run_backend_passes(llvm_module)
-    jit_func = compiler.compile_module(llvm_module, func_egraph)
-
+        ruleset=(loop_ruleset | setup_argtypes(TypeInt64, TypeInt64)),
+        pipeline_report=report,
+        **compiler_config,
+    ).jit_func
+    report.display()
     run_test(example_4, jit_func, (10, 7), verbose=True)

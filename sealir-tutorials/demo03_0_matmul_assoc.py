@@ -1,11 +1,38 @@
-# # Performance is not associative: Matrix Multiplication
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: light
+#       format_version: '1.5'
+#       jupytext_version: 1.16.7
+#   kernelspec:
+#     display_name: Python 3 (ipykernel)
+#     language: python
+#     name: python3
+# ---
+
+# # Demo 3.0: Matrix Multiplication Order: Performance is Not Associative
 #
-# Inspired by [this blog post](https://www.johndcook.com/blog/2017/12/12/efficiency-is-not-associative-for-matrix-multiplication/),
-# this notebook demonstrate how we can use cost-based extraction to get the
-# optimal ordering of matrix multiplication using its associativity property.
+# This demo notebook shows how the order of matrix multiplications can
+# dramatically affect performance, even though the mathematical result is the
+# same. We use cost-based extraction and e-graphs to find the optimal
+# parenthesization for a chain of matrix multiplications, inspired by
+# [this blog post](https://www.johndcook.com/blog/2017/12/12/efficiency-is-not-associative-for-matrix-multiplication/).
+#
+# The notebook demonstrates:
+# - How to use e-graphs and cost models to optimize the order
+# - How to extract and visualize the optimized computation
+
+# ## Imports and Setup
+
+# +
+from typing import Any, TypedDict
+
 import numpy as np
 from egglog import (
     EGraph,
+    Ruleset,
     function,
     i64,
     i64Like,
@@ -31,7 +58,10 @@ from sealir.eqsat.rvsdg_extract import (
 from sealir.rvsdg import format_rvsdg
 from sealir.rvsdg import grammar as rg
 
-from ch01_basic_compiler import frontend
+from ch01_basic_compiler import pipeline_frontend
+from ch04_0_typeinfer_prelude import (
+    pipeline_new_extract as _ch04_0_pipeline_new_extract,
+)
 from ch04_1_typeinfer_ifelse import TypeFloat64
 from ch05_typeinfer_array import (
     ArrayDesc,
@@ -47,12 +77,17 @@ from ch05_typeinfer_array import (
     base_ruleset,
     setup_argtypes,
 )
+from utils import Pipeline, Report, display, visualize_expr_tree
+
+# -
+
 
 SExpr = ase.SExpr
 
-# ## NumPy examples:
+# ## NumPy Example: Three Matrix Multiplications
 #
-# ### Basic: Three Matrix Multiplication
+# We start by showing that the result of matrix multiplication is associative,
+# but the performance can differ depending on the order of operations.
 
 M = 200
 N = 100
@@ -74,7 +109,10 @@ if __name__ == "__main__":
     # optimized
     # %timeit arr0 @ (arr1 @ arr2)
 
-# ## Five matrix multiplications
+# ## NumPy Example: Five Matrix Multiplications
+#
+# Here we define two different ways to multiply five matrices and compare their
+# results and performance.
 
 f0 = lambda arr0, arr1, arr2, arr3: arr0 @ arr1 @ arr2 @ arr1 @ arr2 @ arr3
 
@@ -93,13 +131,23 @@ if __name__ == "__main__":
     res1 = f1(arr0, arr1, arr2, arr3)
     np.testing.assert_allclose(res0, res1)
 
+    report = Report(
+        "Expression tree of different versions",
+        default_expanded=True,
+    )
+    report.append("original version", visualize_expr_tree(f0))
+    report.append("hand-optimized version", visualize_expr_tree(f1))
+    report.display()
+
     # unoptimized
     # %timeit f0(arr0, arr1, arr2, arr3)
     # optimized
     # %timeit f1(arr0, arr1, arr2, arr3)
 
-# ## Egraph
-
+# ## E-Graph Construction for Matrix Multiplication
+#
+# We now build an e-graph to represent all possible ways to parenthesize a chain
+# of matrix multiplications, and encode the associativity rule.
 
 array_0_desc, array_0_infos = array_desc_rules(
     "array_0", shape=(M, N), dtype=TypeFloat64, layout="c"
@@ -196,39 +244,87 @@ def ruleset_matmul_op(io: Term, lhs: Term, rhs: Term, res: Term):
     )
 
 
-# ## Compile
+# ## Compile E-Graph to Extractable Representation
+#
+# This section defines the pipeline to convert the e-graph into a form suitable
+# for extraction and optimization.
 
 
 def code_input(ary0, ary1, ary2, ary3):
     return ary0 @ ary1 @ ary2 @ ary1 @ ary2 @ ary3
 
 
-if __name__ == "__main__":
-    rvsdg_expr, _dbginfo = frontend(code_input)
-    print(format_rvsdg(rvsdg_expr))
-    memo = egraph_conversion(rvsdg_expr)
-    root = GraphRoot(memo[rvsdg_expr])
-    eg = EGraph()
-    eg.let("root", root)
-    eg.run(
-        (
-            ruleset_array_facts
-            | setup_argtypes(
-                array_0_desc.toType(),
-                array_1_desc.toType(),
-                array_2_desc.toType(),
-                array_3_desc.toType(),
-            )
+class EGraphConversionOutput(TypedDict):
+    egraph: EGraph
+    saturation_steps: list[str] | None
+
+
+def egraph_saturation(
+    egraph: EGraph,
+    egraph_root: GraphRoot,
+    extra_ruleset: Ruleset,
+    argtypes: tuple,
+    arg_facts: Ruleset,
+    pipeline_report=Report.Sink(),
+    pipeline_debug=False,
+    animate=False,
+) -> EGraphConversionOutput:
+    with pipeline_report.nest("Egraph saturation") as report:
+        all_rules = (
+            setup_argtypes(*argtypes)
+            | arg_facts
+            | extra_ruleset
             | base_ruleset
-            | ruleset_matmul_op
-            | ruleset_optimize_matmul
-        ).saturate()
+        )
+        saturation_steps: list[str] | None
+        if animate:
+            # Manual saturation loop to extract serialized graph
+            saturation_steps = []
+            while egraph.run(all_rules).updated:
+                jsdata = egraph._serialize(
+                    n_inline_leaves=0, split_primitive_outputs=False
+                ).to_json()
+                saturation_steps.append(jsdata)
+        else:
+            egraph.run(all_rules.saturate())
+            saturation_steps = None
+        if pipeline_debug:
+            report.append("[debug] Saturated egraph", egraph)
+        return dict(egraph=egraph, saturation_steps=saturation_steps)
+
+
+pipeline_middle_end = _ch04_0_pipeline_new_extract.trunc(
+    "pipeline_backend"
+).replace("egraph_saturation", egraph_saturation)
+pipeline_to_egraph = pipeline_middle_end.trunc("pipeline_egraph_extraction")
+
+extra_ruleset = ruleset_matmul_op | ruleset_optimize_matmul
+
+
+if __name__ == "__main__":
+    display(pipeline_to_egraph.visualize())
+    report = Report("Pipeline execution report", enable_nested_metadata=True)
+    argtypes = (
+        array_0_desc.toType(),
+        array_1_desc.toType(),
+        array_2_desc.toType(),
+        array_3_desc.toType(),
     )
+    pipeline_to_egraph(
+        fn=code_input,
+        argtypes=argtypes,
+        arg_facts=ruleset_array_facts,
+        extra_ruleset=extra_ruleset,
+        pipeline_debug=True,
+        pipeline_report=report,
+    )
+    report.display()
 
 
-# ## Cost Model
+# ## Cost Model for Matrix Multiplication
 #
-# We estimate the cost of matrix-multiplication to be `2 * m * n * k`
+# We define a cost model that estimates the computational cost of each matrix
+# multiplication node, based on the classic formula `2 * m * n * k`.
 
 
 class MyCostModel(_ch05_CostModel):
@@ -244,7 +340,6 @@ class MyCostModel(_ch05_CostModel):
         return super().get_cost_function(nodename, op, ty, cost, children)
 
 
-# +
 class NbOp_MatMulKnownShape(NbOp_Base):
     lhs: SExpr
     rhs: SExpr
@@ -252,6 +347,12 @@ class NbOp_MatMulKnownShape(NbOp_Base):
     m: int
     n: int
     k: int
+
+
+# Custom converter to handle the MatMul_KnownShape node when converting from
+# EGraph to RVSDG. This ensures that matrix multiplication nodes with known
+# shapes are represented as NbOp_MatMulKnownShape in the RVSDG, preserving
+# shape information for cost modeling and further analysis.
 
 
 class MyEGraphToRVSDG(ExtendEGraphToRVSDG):
@@ -271,20 +372,25 @@ class MyEGraphToRVSDG(ExtendEGraphToRVSDG):
         return super().handle_Term(op, children, grm)
 
 
-# -
-
 if __name__ == "__main__":
-    cost, out_expr = egraph_extraction(
-        egraph=eg,
-        rvsdg_sexpr=rvsdg_expr,
+    display(pipeline_middle_end.visualize())
+    report = Report("Pipeline execution report", enable_nested_metadata=True)
+    pipeline_middle_end(
+        fn=code_input,
+        argtypes=argtypes,
+        arg_facts=ruleset_array_facts,
+        extra_ruleset=extra_ruleset,
         cost_model=MyCostModel(),
         converter_class=MyEGraphToRVSDG,
+        pipeline_report=report,
+        pipeline_debug=True,
     )
-    print(cost)
-    print(format_rvsdg(out_expr))
+    report.display()
 
-
-# ## Extract Python AST
+# ## Extract Python Source from Optimized Expression
+#
+# This section shows how to turn the optimized computation into executable
+# Python code, and compare it to the original and hand-optimized versions.
 
 
 class SourceMaker(ase.TreeVisitor):
@@ -329,17 +435,68 @@ def func({', '.join(args)}):
         return global_ns["func"]
 
 
-if __name__ == "__main__":
-    visitor = SourceMaker()
-
-    outports = out_expr.body.ports
+def extract_py_source(extracted, sourcemaker_class=SourceMaker, global_ns={}):
+    visitor = sourcemaker_class()
+    outports = extracted.body.ports
     [out_equ] = [p.value for p in outports if p.name == "!ret"]
     ase.apply_bottomup(out_equ, visitor)
-    extracted = visitor.get_function()
+    return visitor.get_function(global_ns=global_ns), visitor.get_source()
 
+
+class ExtractedOutput(TypedDict):
+    extracted: Any
+    source: str
+
+
+@pipeline_middle_end.extend
+def compiler(
+    extracted,
+    sourcemaker_class,
+    global_ns=None,
+    pipeline_report=Report.Sink(),
+    pipeline_debug=False,
+) -> ExtractedOutput:
+    extracted, source = extract_py_source(
+        extracted,
+        sourcemaker_class=sourcemaker_class,
+        global_ns=global_ns or {},
+    )
+    pipeline_report.append("Extracted source", source)
+    return dict(extracted=extracted, source=source)
+
+
+if __name__ == "__main__":
+    display(compiler.visualize())
+
+if __name__ == "__main__":
+    report = Report("Pipeline execution report", enable_nested_metadata=True)
+    cres = compiler(
+        fn=code_input,
+        argtypes=argtypes,
+        extra_ruleset=extra_ruleset,
+        arg_facts=ruleset_array_facts,
+        cost_model=MyCostModel(),
+        converter_class=MyEGraphToRVSDG,
+        sourcemaker_class=SourceMaker,
+        pipeline_report=report,
+        pipeline_debug=True,
+    )
+    report.display()
+    extracted = cres.extracted
     res1 = extracted(arr0, arr1, arr2, arr3)
     res0 = f1(arr0, arr1, arr2, arr3)
     np.testing.assert_allclose(res0, res1)
+
+    report = Report(
+        "Expression tree of different versions",
+        default_expanded=True,
+    )
+    report.append("original version", visualize_expr_tree(f0))
+    report.append("hand-optimized version", visualize_expr_tree(f1))
+    report.append(
+        "superoptimized version", visualize_expr_tree(cres.extracted)
+    )
+    report.display()
 
     # original
     # %timeit f0(arr0, arr1, arr2, arr3)

@@ -7,14 +7,28 @@
 #       format_version: '1.5'
 #       jupytext_version: 1.16.7
 #   kernelspec:
-#     display_name: sealir_basic_compiler
+#     display_name: Python 3 (ipykernel)
 #     language: python
 #     name: python3
 # ---
 
-# # Ch 1. Basic Compiler
+# # Chapter 1: Basic Compiler
 #
 # ## AST frontend and LLVM backend
+#
+# This chapter introduces the fundamental components of our compiler:
+# the AST frontend and LLVM backend. We show how to parse Python functions
+# into an intermediate representation (RVSDG-IR) and then compile them to
+# executable code using LLVM.
+#
+# The chapter covers:
+# - How to implement a frontend that converts Python AST to RVSDG-IR
+# - How to implement a backend that generates LLVM IR
+# - How to JIT compile and execute the generated code
+
+# ## Imports and Setup
+#
+# Import all necessary modules for the basic compiler implementation.
 
 from __future__ import annotations
 
@@ -32,8 +46,11 @@ from sealir.llvm_pyapi_backend import (
     _codegen_loop,
 )
 from sealir.rvsdg import grammar as rg
+from typing_extensions import TypedDict
 
-# ## The frontend
+from utils import Pipeline, Report
+
+# ## Frontend Implementation
 #
 # The frontend accepts a Python function object, reads its source code, and
 # parses its Abstract Syntax Tree (AST). It then transforms the AST into a
@@ -46,15 +63,25 @@ from sealir.rvsdg import grammar as rg
 # appearance.
 
 
-def frontend(fn):
+class FrontendOutput(TypedDict):
+    rvsdg_expr: object
+    dbginfo: object
+
+
+@Pipeline
+def pipeline_frontend(fn, pipeline_report=Report.Sink()) -> FrontendOutput:
     """
     Frontend code is all encapsulated in sealir.rvsdg.restructure_source
     """
-    rvsdg_expr, dbginfo = rvsdg.restructure_source(fn)
+    with pipeline_report.nest("Frontend", default_expanded=True) as report:
+        rvsdg_expr, dbginfo = rvsdg.restructure_source(fn)
+        report.append("Debug Info on RVSDG", dbginfo.show_sources())
+        report.append("RVSDG", rvsdg.format_rvsdg(rvsdg_expr))
+    return {"rvsdg_expr": rvsdg_expr, "dbginfo": dbginfo}
 
-    return rvsdg_expr, dbginfo
 
-
+# ## Simple Frontend Example
+#
 # Here's a simple function to illustrate the frontend
 
 if __name__ == "__main__":
@@ -62,10 +89,21 @@ if __name__ == "__main__":
     def exercise_frontend_simple(x, y):
         return x + y
 
-    rvsdg_expr, dbg = frontend(exercise_frontend_simple)
-    print(rvsdg.format_rvsdg(rvsdg_expr))
+    cres = pipeline_frontend(fn=exercise_frontend_simple)
+    # Results are returned as a SimpleNamespace
+    print(rvsdg.format_rvsdg(cres.rvsdg_expr))
 
-# The function’s RVSDG-IR includes a region:
+
+# Alternatively use Report to display the results
+
+if __name__ == "__main__":
+    report = Report("Frontend", default_expanded=True)
+    cres = pipeline_frontend(
+        fn=exercise_frontend_simple, pipeline_report=report
+    )
+    report.display()
+
+# The function's RVSDG-IR includes a region:
 #
 # ```
 # $0 = Region[236] <- !io x y
@@ -81,9 +119,9 @@ if __name__ == "__main__":
 # each function carries an implicit state that must be updated for any
 # side-effect.
 #
-# The `!ret` port holds the function’s return value.
+# The `!ret` port holds the function's return value.
 #
-# The `x` and `y` output ports convey the region’s internal value state, but the
+# The `x` and `y` output ports convey the region's internal value state, but the
 # function node ignores these values.
 #
 # The single operation in the function is:
@@ -93,12 +131,12 @@ if __name__ == "__main__":
 # ```
 #
 # This is a Python binary operation. It uses input operands from `$0`, which is
-# the header of the function’s region. In this notation, `$0[n]` refers to a
+# the header of the function's region. In this notation, `$0[n]` refers to a
 # specific port: `$0[0]` corresponds to `!io`, `$0[1]` to `x`, and `$0[2]` to
 # `y`.
-#
-#
 
+# ## Complex Frontend Example
+#
 # Below is a more intricate example that requires restructuring of the
 # control flow. This is due to the use of the `break` statement to exit a
 # for-loop.
@@ -120,9 +158,11 @@ if __name__ == "__main__":
             c += i
         return c
 
-    rvsdg_expr, dbg = frontend(exercise_frontend_loop_if_break)
-    print(rvsdg.format_rvsdg(rvsdg_expr))
-
+    report = Report("Frontend", default_expanded=True)
+    cres = pipeline_frontend(
+        fn=exercise_frontend_loop_if_break, pipeline_report=report
+    )
+    report.display()
 
 # Observations from the RVSDG-IR above:
 #
@@ -136,7 +176,7 @@ if __name__ == "__main__":
 # Everything is just an operation with some input and output ports.
 # This simplifies the rest of the compiler.
 
-# ## The backend
+# ## Backend Implementation
 #
 # SealIR includes a lightweight LLVM backend that emits the Python C-API, which
 # executes the RVSDG-IR. The example below demonstrates how to use this backend
@@ -210,6 +250,8 @@ def backend(root, ns=builtins.__dict__, codegen_extension=None):
     return mod
 
 
+# ## JIT Compilation
+#
 # The following function takes a LLVM module and JIT compile it for execution:
 
 
@@ -231,41 +273,57 @@ def jit_compile(mod, rvsdg_expr):
     return JitCallable.from_pointer(rt, ptr, arity)
 
 
+# ## Compiler Pipeline
+#
 # The following is a simple compiler pipeline:
 
 
-def compiler_pipeline(fn, *, verbose=False):
-    rvsdg_expr, dbginfo = frontend(fn)
+class BackendOutput(TypedDict):
+    llmod: object
 
-    if verbose:
-        print("Frontend: Debug Info on RVSDG".center(80, "="))
-        print(dbginfo.show_sources())
 
-        print("Frontend: RVSDG".center(80, "="))
-        print(rvsdg.format_rvsdg(rvsdg_expr))
+@pipeline_frontend.extend
+def pipeline_backend(
+    rvsdg_expr, pipeline_report=Report.Sink()
+) -> BackendOutput:
+    with pipeline_report.nest("Backend", default_expanded=True) as report:
+        llmod = backend(rvsdg_expr)
+        report.append("LLVM", llmod)
+    return {"llmod": llmod}
 
-    llmod = backend(rvsdg_expr)
 
-    if verbose:
-        print("Backend: LLVM".center(80, "="))
-        print(llmod)
+class JITOutput(TypedDict):
+    jit_func: object
 
-    jt = jit_compile(llmod, rvsdg_expr)
-    return jt
+
+@pipeline_backend.extend
+def compiler_pipeline(llmod, rvsdg_expr) -> JITOutput:
+    jit_func = jit_compile(llmod, rvsdg_expr)
+    return {"jit_func": jit_func}
+
+
+# ## Testing Framework
+#
+# Define a testing framework to verify compiler correctness.
 
 
 def run_test(fn, jt, args, *, verbose=False, equal=lambda x, y: x == y):
     res = jt(*args)
+    got = fn(*args)
 
     if verbose:
-        print("JIT: output".center(80, "="))
-        print(res)
+        report = Report("Testing report", default_expanded=False)
+        report.append("Args", args)
+        report.append("JIT output", res)
+        report.append("Expected output", got)
+        report.display()
 
-    got = fn(*args)
     assert equal(res, got), (res, got)
     return res
 
 
+# ## Complete Example
+#
 # The following puts everything together. Running the frontend to generate
 # RVSDG-IR. Then, emitting LLVM using the backend. Finally, JIT'ing it into
 # executable code and verifying it.
@@ -278,5 +336,7 @@ if __name__ == "__main__":
             c += i
         return c
 
-    jt = compiler_pipeline(sum_ints, verbose=True)
+    report = Report("Compiler Pipeline", default_expanded=True)
+    jt = compiler_pipeline(fn=sum_ints, pipeline_report=report).jit_func
+    report.display()
     run_test(sum_ints, jt, (12,), verbose=True)

@@ -12,10 +12,19 @@
 #     name: python3
 # ---
 
-# # Ch 4 Part 2. Fully typing a scalar function with loops
+# # Chapter 4 Part 2: Fully Typing a Scalar Function with Loops
 #
-# We will consider simple loops.
+# This chapter extends the type inference system to handle loop constructs.
+# We show how to implement type inference for while loops, including the
+# propagation of types through loop iterations and the handling of loop
+# conditions.
+#
+# The chapter covers:
+# - How to implement type inference for loop regions
+# - How to handle loop-back type information
+# - How to extend the compiler for loop operations
 
+# ## Imports and Setup
 
 from __future__ import annotations
 
@@ -49,9 +58,6 @@ from ch03_egraph_program_rewrites import (
 )
 from ch04_1_typeinfer_ifelse import Backend as _ch04_1_Backend
 from ch04_1_typeinfer_ifelse import (
-    Compiler,
-)
-from ch04_1_typeinfer_ifelse import (
     ExtendEGraphToRVSDG as _ch04_1_ExtendEGraphToRVSDG,
 )
 from ch04_1_typeinfer_ifelse import (
@@ -69,17 +75,18 @@ from ch04_1_typeinfer_ifelse import (
 )
 from ch04_1_typeinfer_ifelse import base_ruleset as _ch4_1_base_ruleset
 from ch04_1_typeinfer_ifelse import (
+    jit_compiler,
     ruleset_failed_to_unify,
     ruleset_type_infer_failure_report,
     ruleset_type_infer_float,
     setup_argtypes,
 )
 
-# ## Define type inference for loop regions
+# ## Loop Type Inference Rules
 #
-# The logic is similar to the one for if-else.
-# The main difference is the loop-back of type info
-# going from the loop outputs back to the loop inputs.
+# Define type inference for loop regions. The logic is similar to the one
+# for if-else. The main difference is the loop-back of type info going
+# from the loop outputs back to the loop inputs.
 
 
 @ruleset
@@ -144,7 +151,9 @@ def ruleset_propagate_typeof_loops(
     )
 
 
-# ### Define rulesets for extra operations needed:
+# ## Additional Operation Rulesets
+#
+# Define rulesets for extra operations needed for loop compilation.
 
 
 @ruleset
@@ -183,7 +192,9 @@ def ruleset_type_infer_not(x: Term, y: Term, io: Term):
     )
 
 
-# ### Extend EGraphToRVSDG class from Ch4.1 to handle the extra operations
+# ## E-Graph to RVSDG Extension
+#
+# Extend EGraphToRVSDG class from Ch4.1 to handle the extra operations
 
 
 class NbOp_Not_Int64(NbOp_Base):
@@ -198,7 +209,9 @@ class ExtendEGraphToRVSDG(_ch04_1_ExtendEGraphToRVSDG):
         return super().handle_Term(op, children, grm)
 
 
-# ### Extend the LLVM Backend from Ch4.1
+# ## LLVM Backend Extension
+#
+# Extend the LLVM Backend from Ch4.1 to handle loop operations
 
 
 class Backend(_ch04_1_Backend):
@@ -269,6 +282,10 @@ class Backend(_ch04_1_Backend):
         return (yield from super().lower_expr(expr, state))
 
 
+# ## Base Ruleset
+#
+# Combine all rulesets for loop type inference
+
 base_ruleset = (
     _ch4_1_base_ruleset
     | ruleset_type_infer_float
@@ -279,7 +296,9 @@ base_ruleset = (
     | ruleset_propagate_typeof_loops
 )
 
-# ## Example 1: Simple while loop example
+# ## Example 1: Simple While Loop
+#
+# Demonstrate loop compilation with a simple while loop example
 
 
 def example_1(init, n):
@@ -291,19 +310,26 @@ def example_1(init, n):
     return c
 
 
-compiler = Compiler(ExtendEGraphToRVSDG, Backend(), MyCostModel(), True)
+compiler_config = dict(
+    converter_class=ExtendEGraphToRVSDG,
+    backend=Backend(),
+    cost_model=MyCostModel(),
+    verbose=True,
+)
 
 if __name__ == "__main__":
-    llvm_module, func_egraph = compiler.lower_py_fn(
-        example_1,
+    cres = jit_compiler(
+        fn=example_1,
         argtypes=(Int64, Int64),
         ruleset=base_ruleset | setup_argtypes(TypeInt64, TypeInt64),
+        **compiler_config,
     )
-    jit_func = compiler.compile_module(llvm_module, func_egraph)
+    jit_func = cres.jit_func
     run_test(example_1, jit_func, (10, 7), verbose=True)
 
-
-# ## Example 2: Nested Loop example
+# ## Example 2: Nested Loop
+#
+# Test nested loop compilation with a more complex example
 
 
 def example_2(init, n):
@@ -319,10 +345,11 @@ def example_2(init, n):
 
 
 if __name__ == "__main__":
-    llvm_module, func_egraph = compiler.lower_py_fn(
-        example_2,
+    cres = jit_compiler(
+        fn=example_2,
         argtypes=(Int64, Int64),
         ruleset=base_ruleset | setup_argtypes(TypeInt64, TypeInt64),
+        **compiler_config,
     )
-    jit_func = compiler.compile_module(llvm_module, func_egraph)
+    jit_func = cres.jit_func
     run_test(example_2, jit_func, (10, 7), verbose=True)

@@ -12,10 +12,19 @@
 #     name: python3
 # ---
 
-# # Ch 8. GPU offloading for MLIR ufunc operations
+# # Chapter 8: GPU Offloading for MLIR Ufunc Operations
 #
+# This chapter extends the MLIR ufunc system to support GPU offloading using
+# CUDA. We show how to compile and execute vectorized operations (ufunc) on
+# NVIDIA GPUs, demonstrating the full pipeline from Python functions to GPU
+# kernels.
+#
+# The chapter covers:
+# - How to extend the MLIR backend for GPU compilation
+# - How to use CUDA-specific MLIR passes for kernel generation
+# - How to handle GPU memory management and data transfer
 
-# In this chapter, we'll look at type inference for array operations.
+# ## Imports and Setup
 
 from __future__ import annotations
 
@@ -31,26 +40,35 @@ import mlir.runtime as runtime
 import numpy as np
 from numba import cuda
 
-from ch04_2_typeinfer_loops import (
-    Compiler,
-    MyCostModel,
-)
 from ch05_typeinfer_array import NbOp_ArrayType
 from ch06_mlir_backend import Backend as _Backend
-from ch06_mlir_backend import ConditionalExtendGraphtoRVSDG, NbOp_Type
-from ch07_mlir_ufunc import Float64, ufunc_vectorize
+from ch06_mlir_backend import NbOp_Type
+from ch07_mlir_ufunc import Float64, compiler_config, ufunc_vectorize
 from utils import IN_NOTEBOOK
+
+# ## CUDA Environment Setup
+#
+# Configure CUDA environment variables for proper GPU compilation.
 
 # Requires the CUDA toolkit.
 # If using `conda install cuda`, set `CUDA_HOME=$CONDA_PREFIX`
 if "CUDA_HOME" not in os.environ and "CONDA_PREFIX" in os.environ:
     os.environ["CUDA_HOME"] = os.environ["CONDA_PREFIX"]
 
+# ## GPU Backend Implementation
+#
+# Extend the MLIR backend to support GPU compilation and execution.
 
-_DEBUG = True
+_DEBUG = False
 
 
 class GPUBackend(_Backend):
+    compile_only: bool
+
+    def __init__(self, compile_only: bool = False):
+        super().__init__()
+        self.compile_only = compile_only
+
     # Lower symbolic array to respective memref.
     # Note: This is not used within ufunc builder,
     # since it has explicit declaration of the respective
@@ -70,7 +88,13 @@ class GPUBackend(_Backend):
         return super().lower_type(ty)
 
     def run_passes(self, module):
-        module.dump()
+        """GPU Pass Pipeline
+
+        Define the MLIR pass pipeline for GPU compilation, including
+        parallelization, kernel outlining, and NVVM code generation.
+        """
+        if _DEBUG:
+            module.dump()
         pass_man = passmanager.PassManager(context=module.context)
 
         if _DEBUG:
@@ -92,7 +116,8 @@ class GPUBackend(_Backend):
             "func.func(gpu-map-parallel-loops,convert-parallel-loops-to-gpu)"
         )
         pass_man.add("gpu-kernel-outlining")
-        pass_man.add('gpu-lower-to-nvvm-pipeline{cubin-format="fatbin"}')
+        if not self.compile_only:
+            pass_man.add('gpu-lower-to-nvvm-pipeline{cubin-format="fatbin"}')
         pass_man.add("convert-scf-to-cf")
         pass_man.add("finalize-memref-to-llvm")
         pass_man.add("convert-math-to-libm")
@@ -104,11 +129,16 @@ class GPUBackend(_Backend):
         pass_man.enable_verifier(True)
         pass_man.run(module.operation)
         # Output LLVM-dialect MLIR
-        module.dump()
+        if _DEBUG:
+            module.dump()
         return module
 
     @classmethod
     def get_exec_ptr(cls, mlir_ty, val):
+        """Get Execution Pointer
+
+        Convert MLIR types to C-types and allocate memory for the value.
+        """
         if isinstance(mlir_ty, ir.IntegerType):
             val = 0 if val is None else val
             ptr = ctypes.pointer(ctypes.c_int64(val))
@@ -156,27 +186,35 @@ class GPUBackend(_Backend):
         da.itemsize = arr.itemsize
         return da
 
-    @classmethod
-    def jit_compile_(
-        cls,
+    def jit_compile_extra(
+        self,
         llmod,
         input_types,
         output_types,
         function_name="func",
         exec_engine=None,
+        is_ufunc=False,
         **execution_engine_params,
     ):
+        """JIT Compilation
+
+        Convert the MLIR module into a JIT-callable function using the MLIR
+        execution engine.
+        """
+        if self.compile_only:
+            return None
         cuda_libs = (
             "mlir_cuda_runtime",
             "mlir_c_runner_utils",
             "mlir_runner_utils",
         )
         cuda_shared_libs = [find_library(x) for x in cuda_libs]
-        return super().jit_compile_(
+        return super().jit_compile_extra(
             llmod,
             input_types,
             output_types,
             function_name,
+            is_ufunc=is_ufunc,
             exec_engine=execution_engine.ExecutionEngine(
                 llmod, opt_level=3, shared_libs=cuda_shared_libs
             ),
@@ -184,27 +222,39 @@ class GPUBackend(_Backend):
         )
 
 
+# ## GPU Compiler Configuration
+#
+# Set up the GPU compiler configuration with fallback to CPU if CUDA is
+# unavailable.
+
+gpu_compiler_config = {
+    **compiler_config,
+    "backend": GPUBackend(compile_only=not cuda.is_available()),
+}
+
+# ## Example: GPU Ufunc Function
+#
+# Demonstrate GPU offloading with a simple ufunc function that performs
+# element-wise operations on GPU.
+
 if __name__ == "__main__":
+
+    @ufunc_vectorize(
+        input_type=Float64, ndim=2, compiler_config=gpu_compiler_config
+    )
+    def foo(a, b, c):
+        x = a + 1.0
+        y = b - 2.0
+        z = c + 3.0
+        return x + y + z
+
+    # Create NumPy arrays
+    ary = np.arange(100, dtype=np.float64).reshape(10, 10)
+    ary_2 = np.arange(100, dtype=np.float64).reshape(10, 10)
+    ary_3 = np.arange(100, dtype=np.float64).reshape(10, 10)
+
     if not cuda.is_available():
         print("SKIPPED. CUDA unavailable")
     else:
-        gpu_compiler = Compiler(
-            ConditionalExtendGraphtoRVSDG, GPUBackend(), MyCostModel(), True
-        )
-
-        @ufunc_vectorize(
-            input_type=Float64, ndim=2, ufunc_compiler=gpu_compiler
-        )
-        def foo(a, b, c):
-            x = a + 1.0
-            y = b - 2.0
-            z = c + 3.0
-            return x + y + z
-
-        # Create NumPy arrays
-        ary = np.arange(100, dtype=np.float64).reshape(10, 10)
-        ary_2 = np.arange(100, dtype=np.float64).reshape(10, 10)
-        ary_3 = np.arange(100, dtype=np.float64).reshape(10, 10)
-
         got = foo(ary, ary_2, ary_3)
         print("Got", got)

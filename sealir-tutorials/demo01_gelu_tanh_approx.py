@@ -1,18 +1,39 @@
-# # Demo 1: Tanh Approximation for GELU activation layer
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: light
+#       format_version: '1.5'
+#       jupytext_version: 1.16.7
+#   kernelspec:
+#     display_name: Python 3 (ipykernel)
+#     language: python
+#     name: python3
+# ---
+
+# # Demo 1: Tanh Approximation for GELU Activation Layer
 #
 # (Depends on Ch.06)
 #
-# The deep learning community has been building domain specific compilers
-# because traditional compilers do not know the domain specific rewrites,
-# and extending these compilers is very time consuming and challenging.
+# This demo notebook shows how to use e-graphs and cost-based rewriting to
+# optimize the GELU activation function, which is widely used in deep learning.
+# We demonstrate how to encode and optimize a Pade44 rational approximation for
+# `tanh()` as used in GELU, and how to lower the optimized computation to MLIR
+# and run it efficiently.
 #
-# In this demo, we show how easy it is to encode pade44 approximation for
-# `tanh()` that is used in GELU activation function:
+# The notebook demonstrates:
+# - How to extend the compiler for NumPy and GELU-specific rewrites
+# - How to encode and optimize the Pade44 approximation for tanh
+# - How to lower and run the optimized computation using MLIR
+# - How to compare the results and performance of the original and optimized
+#   versions
 #
 # $$ \text{GELU}(x) \approx 0.5x \left(1 + \tanh\left(\sqrt{\frac{2}{\pi}}
 # \left(x + 0.044715x^3\right)\right)\right) $$
 
-# import needed modules:
+# ## Imports and Setup
+
 
 import mlir.dialects.arith as arith
 import mlir.dialects.math as math
@@ -62,19 +83,24 @@ from ch04_1_typeinfer_ifelse import (
     make_rules_for_binop,
     setup_argtypes,
 )
-from ch05_typeinfer_array import (
-    Compiler,
-    ExtendEGraphToRVSDG,
-)
 from ch05_typeinfer_array import MyCostModel as ch06_CostModel
 from ch05_typeinfer_array import (
     base_ruleset,
 )
-from ch06_mlir_backend import LowerStates, run_test
+from ch06_mlir_backend import LowerStates, jit_compiler, run_test
 from ch07_mlir_ufunc import Backend as UfuncBackend
-from ch07_mlir_ufunc import Float32, TypeFloat32, ufunc_vectorize
+from ch07_mlir_ufunc import (
+    Float32,
+    TypeFloat32,
+    ufunc_compiler,
+    ufunc_vectorize,
+)
+from utils.report import Report
 
-# ## The GELU function
+# ## The GELU Function
+#
+# Define the GELU activation function using NumPy, with the tanh-based
+# approximation.
 
 
 def gelu_tanh_forward(a):
@@ -90,9 +116,12 @@ def gelu_tanh_forward(a):
     return result
 
 
-# ## First, we define new features needed for the above function
+# ## Extend the Compiler for Needed Features
+#
+# Add type inference and rules for NumPy modules, operations, and attributes
+# required for the GELU function.
 
-# ### Type inference for NumPy module
+# ### Type Inference for NumPy Module
 
 
 class Module(Expr):
@@ -147,7 +176,7 @@ def facts_numpy_module(io: Term, name: String, op: Term, args: Vec[Term]):
     yield unary_func("tanh", Npy_tanh)
 
 
-# ### Type inference for NumPy operations
+# ### Type Inference for NumPy Operations
 
 
 @function
@@ -218,7 +247,7 @@ def ruleset_module(
     )
 
 
-# # Type inference for `float32` operations
+# ### Type Inference for `float32` Operations
 
 
 # +
@@ -266,6 +295,7 @@ additional_rules = (
 
 # ### Extend the RVSDG Grammar
 
+# +
 SExpr = rvsdg.grammar.SExpr
 
 
@@ -351,7 +381,14 @@ class ExtendEGraphToRVSDG(ch04_1_ExtendEGraphToRVSDG):
         return grm.write(rg.Undef(str(key)))
 
 
-# ### Extend the backend
+# ### Extend the Backend to Support NumPy Operations
+#
+# The Backend class extends UfuncBackend to handle the specific NumPy operations
+# used in the GELU function. It provides MLIR lowering for:
+# - Basic arithmetic operations (add, multiply, divide)
+# - Type conversions (f64->f32, i64->f32)
+# - NumPy mathematical functions (sqrt, tanh, pow)
+# - Fallback handling for undefined operations
 
 
 class Backend(UfuncBackend):
@@ -402,7 +439,9 @@ class Backend(UfuncBackend):
 
 # ## Cost Model
 #
-# Assign higher cost for the Transcendental functions:
+# Assign higher cost for the transcendental functions, and lower cost for
+# arithmetic and type conversion operations. This encourages the optimizer to
+# prefer rational approximations over transcendental functions when possible.
 
 
 class MyCostModel(ch06_CostModel):
@@ -421,22 +460,49 @@ class MyCostModel(ch06_CostModel):
         return super().get_cost_function(nodename, op, ty, cost, children)
 
 
-# ### Run the baseline function
-compiler = Compiler(ExtendEGraphToRVSDG, Backend(), MyCostModel(), True)
+# ## Run the Extended Pipeline
+#
+# Compile and run the original GELU function using the extended pipeline and
+# report the results.
+
+compiler_config = dict(
+    converter_class=ExtendEGraphToRVSDG,
+    backend=Backend(),
+    cost_model=MyCostModel(),
+    verbose=True,
+)
 
 if __name__ == "__main__":
-    llvm_module, func_egraph = compiler.lower_py_fn(
-        gelu_tanh_forward,
+    report = Report("Pipeline execution report", enable_nested_metadata=True)
+    jit_func = jit_compiler(
+        fn=gelu_tanh_forward,
         argtypes=(Float32,),
         ruleset=(
             base_ruleset | setup_argtypes(TypeFloat32) | additional_rules
         ),
-    )
-    compiler.run_backend_passes(llvm_module)
-    jit_func = compiler.compile_module(llvm_module, func_egraph)
+        pipeline_report=report,
+        **compiler_config,
+    ).jit_func
+    report.display()
     run_test(gelu_tanh_forward, jit_func, (0.234,), verbose=True)
 
-# ## Add rules to optimize
+# ## Add Rules to Optimize
+#
+# Add rewrite rules for the Pade44 approximation of tanh(x) and for expanding
+# power operations into multiplication chains. These rules enable the optimizer
+# to replace expensive transcendental functions with efficient arithmetic.
+
+
+# ### Define Pade44 approximation rewrite rule for tanh(x)
+#
+# The Pade44 approximation replaces tanh(x) with a rational function:
+#
+# $$ tanh(x) ≈ (10x^3 + 105x) / (x^4 + 45x^2 + 105) $$
+#
+# This approximation provides good accuracy for small to moderate values of x
+# while avoiding the computational cost of the transcendental tanh function.
+# The rational form allows for efficient evaluation using only basic arithmetic
+# operations (addition, multiplication, division) and power operations.
 
 
 @ruleset
@@ -461,6 +527,12 @@ def pade44_tanh_expansion(x: Term):
     )
 
 
+# Define expansion of power operations (e.g., x^N) to a sequence of multiplications
+# This converts expensive power operations into more efficient multiplication chains
+# For example: x^3 becomes x * x * x, and x^0 becomes 1.0
+# Note: The exponent N must be a compile-time constant for this optimization to work
+
+
 @ruleset
 def pow_expansion(x: Term, ival: i64):
     # Rules to expand pow(x, i) to multiplcations
@@ -477,13 +549,19 @@ def pow_expansion(x: Term, ival: i64):
     )
 
 
+# Combine the rules. Rules are composable.
+
 optimize_rules = pade44_tanh_expansion | pow_expansion
 
-# ### Run the optimized function
+# ## Run the Optimized Function
+#
+# Compile and run the optimized GELU function using the new rules, and report
+# the results.
 
 if __name__ == "__main__":
-    llvm_module, func_egraph = compiler.lower_py_fn(
-        gelu_tanh_forward,
+    report = Report("Pipeline execution report", enable_nested_metadata=True)
+    jit_func = jit_compiler(
+        fn=gelu_tanh_forward,
         argtypes=(Float32,),
         ruleset=(
             base_ruleset
@@ -491,30 +569,45 @@ if __name__ == "__main__":
             | additional_rules
             | optimize_rules
         ),
-    )
-    compiler.run_backend_passes(llvm_module)
-    jit_func = compiler.compile_module(llvm_module, func_egraph)
+        pipeline_report=report,
+        **compiler_config,
+    ).jit_func
+    report.display()
 
 
-# ### Compare the result
+# ### Compare the Result
 #
-# Since this is an approximation (and IEEE754), the results are good at
-# rtol=1e-6.
+# Compare the output of the original and optimized GELU functions, allowing for
+# a small tolerance due to floating-point approximation.
 
 if __name__ == "__main__":
     relclose = lambda x, y: np.allclose(x, y, rtol=1e-6)
-    run_test(gelu_tanh_forward, jit_func, (0.234,), equal=relclose)
+    run_test(
+        gelu_tanh_forward, jit_func, (0.234,), equal=relclose, verbose=True
+    )
 
 
-# ### Ufunc version
+# ### Ufunc Version
+#
+# Demonstrate vectorized (ufunc) compilation and execution of the optimized
+# GELU function, and compare results for a batch of inputs.
 
 if __name__ == "__main__":
+    report = Report("Pipeline execution report", enable_nested_metadata=True)
     vectorized_gelu = ufunc_vectorize(
         input_type=Float32,
         ndim=1,
-        ufunc_compiler=compiler,
+        compiler_config={**compiler_config, "pipeline_report": report},
         extra_ruleset=additional_rules,
     )(gelu_tanh_forward)
+    report.display()
     relclose = lambda x, y: np.allclose(x, y, rtol=1e-6)
     input_val = np.random.random(100).astype(np.float32)
-    run_test(gelu_tanh_forward, vectorized_gelu, (input_val,), equal=relclose)
+
+    run_test(
+        gelu_tanh_forward,
+        vectorized_gelu,
+        (input_val,),
+        equal=relclose,
+        verbose=True,
+    )

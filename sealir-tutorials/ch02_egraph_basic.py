@@ -7,12 +7,12 @@
 #       format_version: '1.5'
 #       jupytext_version: 1.16.7
 #   kernelspec:
-#     display_name: sealir_basic_compiler
+#     display_name: Python 3 (ipykernel)
 #     language: python
 #     name: python3
 # ---
 
-# ## Ch 2. Adding the EGraph middle-end
+# # Chapter 2: Adding the EGraph Middle-End
 #
 # Traditional compiler design depends on a series of compiler passes. However,
 # this approach suffers from the phase-ordering problem—where the specific order
@@ -26,13 +26,17 @@
 #
 # In this chapter, we will define the middle end—--the stage of a compiler that
 # optimizes and transforms an intermediate representation (IR) of a program,
-# connecting the front end (which converts source code into IR) to the back end
+# connecting the front end (which con,verts source code into IR) to the back end
 # (which produces target machine code). The egglog library powers our use of
-# EGraphs. Before exploring how to write rules for EGraphs, we’ll first
+# EGraphs. Before exploring how to write rules for EGraphs, we'll first
 # establish a conversion from RVSDG-IR to EGraph. RVSDG-IR must be encoded into
 # the EGraph, enabling us to apply rewrite rulesets for program optimization or
 # analysis. Afterward, an extraction step selects the most efficient variant
 # from the EGraph.
+
+# ## Imports and Setup
+
+from typing import Any, TypedDict
 
 from egglog import EGraph
 from sealir import rvsdg
@@ -41,21 +45,53 @@ from sealir.eqsat.rvsdg_eqsat import GraphRoot
 from sealir.eqsat.rvsdg_extract import egraph_extraction
 
 # We'll be extending from chapter 1.
-from ch01_basic_compiler import backend, frontend, jit_compile, run_test
-from utils import IN_NOTEBOOK
+from ch01_basic_compiler import (
+    backend,
+)
+from ch01_basic_compiler import compiler_pipeline as pipeline_jit_compile
+from ch01_basic_compiler import (
+    jit_compile,
+    pipeline_backend,
+    pipeline_frontend,
+    run_test,
+)
+from utils import IN_NOTEBOOK, Report, display
 
-# ## A simple roundtripping to and from EGraph
+# ## Simple EGraph Roundtripping
 #
 # Our initial middle-end is a simple roundtripping from RVSDG-IR to EGraph and
 # back to RVSDG-IR. `SealIR` provides `egraph_conversion()` for RVSDG-IR to
 # EGraph, and `egraph_extraction()` for EGraph to RVSDG-IR.
-#
-# ### Convert to EGraph
+
+# ### Convert RVSDG to EGraph
 #
 # The following code shows the RVSDG-IR and egraph for the `max_if_else()`
 # function. The two are almost a direct mapping.
 
+
+class EGraphOutput(TypedDict):
+    egraph: EGraph
+    egraph_root: GraphRoot
+
+
+@pipeline_frontend.extend
+def pipeline_egraph_conversion(
+    rvsdg_expr, pipeline_report=Report.Sink()
+) -> EGraphOutput:
+    with pipeline_report.nest(
+        "EGraph Conversion", default_expanded=True
+    ) as report:
+        memo = egraph_conversion(rvsdg_expr)
+        egraph = EGraph()
+        root = GraphRoot(memo[rvsdg_expr])
+        egraph.let("root", root)
+        report.append("EGraph", egraph)
+        return {"egraph": egraph, "egraph_root": root}
+
+
 if __name__ == "__main__":
+
+    display(pipeline_egraph_conversion.visualize())
 
     def max_if_else(x, y):
         if x > y:
@@ -64,16 +100,10 @@ if __name__ == "__main__":
             return y
 
     # Get RVSDG
-    rvsdg_expr, dbginfo = frontend(max_if_else)
-    print(rvsdg.format_rvsdg(rvsdg_expr))
-    # Convert RVSDG to Egraph
-    memo = egraph_conversion(rvsdg_expr)
-    func = memo[rvsdg_expr]
+    report = Report("EGraph Conversion", default_expanded=True)
+    cres = pipeline_egraph_conversion(fn=max_if_else, pipeline_report=report)
+    report.display()
 
-    egraph = EGraph()
-    egraph.let("root", GraphRoot(func))
-    if IN_NOTEBOOK:
-        egraph.display(graphviz=True)
 
 # ### Extract from EGraph
 #
@@ -86,64 +116,86 @@ if __name__ == "__main__":
 # energy efficiency. To address this, the `egraph_extraction()` function allows
 # users to define custom cost models, tailoring the selection process to
 # prioritize the variant that aligns with their specific optimization goals.
-#
 
 if __name__ == "__main__":
     help(egraph_extraction)
 
 # Here, we will use the default cost model, which is based on the node count.
 
+
+class EGraphExtractionOutput(TypedDict):
+    cost: float
+    extracted: Any
+
+
+@pipeline_egraph_conversion.extend
+def pipeline_egraph_extraction(
+    egraph, rvsdg_expr, pipeline_report=Report.Sink()
+) -> EGraphExtractionOutput:
+    with pipeline_report.nest(
+        "EGraph Extraction", default_expanded=True
+    ) as report:
+        cost, extracted = egraph_extraction(egraph, rvsdg_expr)
+        report.append("Cost", cost)
+        report.append("Extracted", rvsdg.format_rvsdg(extracted))
+        return {"cost": cost, "extracted": extracted}
+
+
 if __name__ == "__main__":
-    cost, extracted = egraph_extraction(egraph, rvsdg_expr)
-    print(rvsdg.format_rvsdg(extracted))
+    report = Report("EGraph Extraction", default_expanded=True)
+    cres = pipeline_egraph_extraction(fn=max_if_else, pipeline_report=report)
+    report.display()
 
 
-# ## Putting the middle-end logic together
+# ## Extended Compiler Pipeline
+#
+# Redefine the compiler pipeline to include the middle-end with EGraph
+# optimization capabilities.
 
 
-def middle_end(rvsdg_expr, apply_to_egraph):
-    """The middle end encode the RVSDG into a EGraph to apply rewrite rules.
-    After that, it is extracted back into RVSDG.
-    """
-    # Convert to egraph
-    memo = egraph_conversion(rvsdg_expr)
-
-    func = memo[rvsdg_expr]
-
-    egraph = EGraph()
-    apply_to_egraph(egraph, func)
-
-    # Extraction
-    cost, extracted = egraph_extraction(egraph, rvsdg_expr)
-    return cost, extracted
+def egraph_action(
+    egraph: EGraph,
+    egraph_root: GraphRoot,
+    pipeline_report=Report.Sink(),
+) -> EGraphOutput:
+    # For now, the middle end is just an identity function that exercise
+    # the encoding into and out of egraph.
+    with pipeline_report.nest("EGraph Action") as report:
+        report.append("EGraph", egraph)
+    return {"egraph": egraph, "egraph_root": egraph_root}
 
 
-# Here, we redefine the compiler pipeline to include the middle-end.
+pipeline_middle_end = pipeline_egraph_extraction.insert(-1, egraph_action)
+
+if __name__ == "__main__":
+    display(pipeline_middle_end.visualize())
 
 
-def compiler_pipeline(fn, *, verbose=False):
-    rvsdg_expr, dbginfo = frontend(fn)
-
-    # Middle end
-    def define_egraph(egraph: EGraph, func):
-        # For now, the middle end is just an identity function that exercise
-        # the encoding into and out of egraph.
-        root = GraphRoot(func)
-        egraph.let("root", root)
-        if verbose and IN_NOTEBOOK:
-            # For inspecting the egraph
-            egraph.display(graphviz=True)
-
-    cost, extracted = middle_end(rvsdg_expr, define_egraph)
-    print("Extracted from EGraph".center(80, "="))
-    print("cost =", cost)
-    print(rvsdg.format_rvsdg(extracted))
-
-    llmod = backend(extracted)
-    return jit_compile(llmod, extracted)
+class BackendOutput(TypedDict):
+    jit_func: Any
+    llmod: Any
 
 
-# The following exercises our new pipeline:
+@pipeline_middle_end.extend
+def pipeline_backend(
+    extracted, pipeline_report=Report.Sink()
+) -> BackendOutput:
+    with pipeline_report.nest("Backend", default_expanded=True) as report:
+        llmod = backend(extracted)
+        report.append("LLVM", llmod)
+        jt = jit_compile(llmod, extracted)
+        return {"jit_func": jt, "llmod": llmod}
+
+
+compiler_pipeline = pipeline_backend
+
+if __name__ == "__main__":
+    display(compiler_pipeline.visualize())
+
+# ## Example: Testing the EGraph Pipeline
+#
+# Exercise the new pipeline with a simple function to demonstrate the
+# EGraph-based optimization process.
 
 if __name__ == "__main__":
 
@@ -153,5 +205,7 @@ if __name__ == "__main__":
             c += i
         return c
 
-    jt = compiler_pipeline(sum_ints, verbose=True)
-    run_test(sum_ints, jt, (12,))
+    report = Report("Compiler Pipeline", default_expanded=True)
+    jt = compiler_pipeline(fn=sum_ints, pipeline_report=report).jit_func
+    report.display()
+    run_test(sum_ints, jt, (12,), verbose=True)

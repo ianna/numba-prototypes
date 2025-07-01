@@ -12,10 +12,19 @@
 #     name: python3
 # ---
 
-# # Ch 5. Type infer array operations
+# # Chapter 5: Type Inference for Array Operations
 #
+# This chapter extends the type inference system to handle array operations,
+# including array indexing, broadcasting, and shape inference. We show how
+# to encode array metadata in the e-graph and implement type inference rules
+# for array operations.
+#
+# The chapter covers:
+# - How to represent array types with dimensions and shapes
+# - How to implement array indexing operations
+# - How to handle array broadcasting and shape inference
 
-# In this chapter, we'll look at type inference for array operations.
+# ## Imports and Setup
 
 from __future__ import annotations
 
@@ -47,11 +56,6 @@ from sealir.eqsat.py_eqsat import (
     Py_SubscriptIO,
 )
 from sealir.eqsat.rvsdg_eqsat import (
-    GraphRoot,
-    InPorts,
-    Port,
-    PortList,
-    Region,
     Term,
 )
 
@@ -62,9 +66,6 @@ from ch04_1_typeinfer_ifelse import (
     _wc,
 )
 from ch04_2_typeinfer_loops import Backend as _ch04_2_Backend
-from ch04_2_typeinfer_loops import (
-    Compiler,
-)
 from ch04_2_typeinfer_loops import (
     ExtendEGraphToRVSDG as _ch04_2_ExtendEGraphToRVSDG,
 )
@@ -77,20 +78,22 @@ from ch04_2_typeinfer_loops import (
     TypeInt64,
     TypeVar,
     base_ruleset,
+    jit_compiler,
     setup_argtypes,
 )
 from utils import IN_NOTEBOOK
 
-# ## Define the `ArrayDesc` to describe metadata for an Array type
+# ## Array Type Definitions
 #
-# The Array type is more interesting because it is not a simple scalar values.
-# The array type has attributes like data-typenumber of dimensions, shape and
-# data-layout.
-# Shape of an array can be statically known to be a fixed integer,
-# or it can be symbolic.
+# Define the `ArrayDesc` to describe metadata for an Array type. The Array
+# type is more interesting because it is not a simple scalar values. The
+# array type has attributes like data-type, number of dimensions, shape and
+# data-layout. Shape of an array can be statically known to be a fixed
+# integer, or it can be symbolic.
 
-
-# ### Define Dim for the shape info at each dimension
+# ### Dimension Representation
+#
+# Define Dim for the shape info at each dimension
 
 
 class Dim(Expr):
@@ -100,7 +103,9 @@ class Dim(Expr):
     def symbolic(self, unque_id: StringLike) -> Dim: ...
 
 
-# ### Define DataLayout
+# ### Data Layout Representation
+#
+# Define DataLayout for array memory layout
 
 
 class DataLayout(Expr):
@@ -112,9 +117,10 @@ class DataLayout(Expr):
     def strided(cls) -> DataLayout: ...
 
 
-# ### Define ArrayDesc
+# ### Array Description
 #
-# Note that `ArrayDesc` is convertible to `Type`.
+# Define ArrayDesc to represent array metadata. Note that `ArrayDesc` is
+# convertible to `Type`.
 
 
 class ArrayDesc(Expr):
@@ -133,6 +139,10 @@ class ArrayDesc(Expr):
 
     def toType(self) -> Type: ...
 
+
+# ## Array Type Examples
+#
+# Demonstrate how to set up array types with different properties.
 
 # Example: set the dtype
 
@@ -167,8 +177,9 @@ if __name__ == "__main__":
     if IN_NOTEBOOK:
         eg.display(graphviz=True)
 
-
-# ### Merging symbolic dimension to fixed dimension
+# ## Symbolic Dimension Merging
+#
+# Demonstrate how symbolic dimensions can be merged and resolved.
 
 # introduce a new array `array1`
 
@@ -184,9 +195,8 @@ if __name__ == "__main__":
     if IN_NOTEBOOK:
         eg.display(graphviz=True)
 
-
-# Merging `array0` with `array1` will also propagate equivalences to the `.dim()`.
-# This will make shape inference trivial to implement.
+# Merging `array0` with `array1` will also propagate equivalences to the
+# `.dim()`. This will make shape inference trivial to implement.
 
 if __name__ == "__main__":
     eg.register(union(array0).with_(array1))
@@ -204,7 +214,9 @@ if __name__ == "__main__":
     eg.check(Dim.symbolic("N") == Dim.fixed(24))
     eg.check(Dim.symbolic("K") == Dim.fixed(4))
 
-# ## Extend the compiler for Array implementation
+# ## Compiler Extensions for Arrays
+#
+# Extend the compiler for Array implementation
 
 
 class NbOp_ArrayDimFixed(NbOp_Base):
@@ -222,7 +234,9 @@ class NbOp_ArrayType(NbOp_Base):
     shape: tuple[SExpr, ...]
 
 
-# ## Example 1: ``Array.__getitem__``
+# ## Example 1: Array Indexing
+#
+# Implement `Array.__getitem__` operation
 
 
 def example_1(ary, idx):
@@ -236,8 +250,9 @@ array_1d_symbolic = NbOp_ArrayType(
     shape=(NbOp_ArrayDimSymbolic("m"),),
 )
 
-
-# ### Define egraph rules for the array operation
+# ### E-Graph Rules for Array Operations
+#
+# Define egraph rules for the array operation
 
 
 def array_desc_rules(
@@ -320,7 +335,9 @@ class NbOp_Array_1D_Getitem_Scalar(NbOp_Base):
     attr: SExpr
 
 
-# ### Extend egraph extraction
+# ### Extend E-Graph Extraction
+#
+# Extend egraph extraction to handle array operations
 
 
 class ExtendEGraphToRVSDG(_ch04_2_ExtendEGraphToRVSDG):
@@ -343,7 +360,9 @@ class ExtendEGraphToRVSDG(_ch04_2_ExtendEGraphToRVSDG):
         return super().handle_Term(op, children, grm)
 
 
-# ### Extend the LLVM backend
+# ### Extend the LLVM Backend
+#
+# Extend the LLVM backend for array operations
 
 
 class Backend(_ch04_2_Backend):
@@ -393,7 +412,9 @@ class Backend(_ch04_2_Backend):
         return super().get_ctype(lltype)
 
 
-# ### `ctypes` definition for Array
+# ### C-Types Definition for Array
+#
+# Define ctypes for array handling
 
 
 class CtypeInt64Array1D(ctypes.Structure):
@@ -404,12 +425,17 @@ array_int64_1d, array_infos = array_desc_rules(
     "array_int64_1d", shape=("n",), dtype=TypeInt64, layout="c"
 )
 
-compiler = Compiler(ExtendEGraphToRVSDG, Backend(), MyCostModel(), True)
+compiler_config = dict(
+    converter_class=ExtendEGraphToRVSDG,
+    backend=Backend(),
+    cost_model=MyCostModel(),
+    verbose=True,
+)
 
 if __name__ == "__main__":
     # compile
-    llvm_module, func_egraph = compiler.lower_py_fn(
-        example_1,
+    cres = jit_compiler(
+        fn=example_1,
         argtypes=(array_1d_symbolic, Int64),
         ruleset=(
             base_ruleset
@@ -417,8 +443,9 @@ if __name__ == "__main__":
             | ruleset(*array_infos)
             | ruleset_typeinfer_array_getitem
         ),
+        **compiler_config,
     )
-    jit_func = compiler.compile_module(llvm_module, func_egraph)
+    jit_func = cres.jit_func
     # create array
     ary = np.arange(10, dtype=np.int64)
     # prepare array for passing to C-API
@@ -432,8 +459,7 @@ if __name__ == "__main__":
     expect = example_1(ary, 3)
     assert got == expect
 
-
-# ## Example 2: Sum numbers in 1D array
+# ## Example 2: 1D Array Summation
 #
 # This example works without any new extension
 
@@ -448,8 +474,8 @@ def example_2(ary, size):
 
 
 if __name__ == "__main__":
-    llvm_module, func_egraph = compiler.lower_py_fn(
-        example_2,
+    cres = jit_compiler(
+        fn=example_2,
         argtypes=(array_1d_symbolic, Int64),
         ruleset=(
             base_ruleset
@@ -457,8 +483,9 @@ if __name__ == "__main__":
             | ruleset(*array_infos)
             | ruleset_typeinfer_array_getitem
         ),
+        **compiler_config,
     )
-    jit_func = compiler.compile_module(llvm_module, func_egraph)
+    jit_func = cres.jit_func
 
     ary = np.arange(10, dtype=np.int64)
     param_ary = CtypeInt64Array1D()
@@ -470,10 +497,10 @@ if __name__ == "__main__":
     expect = example_2(ary, ary.size)
     assert got == expect
 
-
-# ## Broadcasting logic
+# ## Broadcasting Logic
 #
-# Broadcasting can be implemented as declarative logic in the egraph. Let's start with an example:
+# Broadcasting can be implemented as declarative logic in the egraph. Let's
+# start with an example:
 
 if __name__ == "__main__":
     eg = EGraph()
@@ -502,8 +529,9 @@ if __name__ == "__main__":
     if IN_NOTEBOOK:
         eg.display(graphviz=True)
 
-
-# ### Define Broadcast
+# ### Define Broadcast Function
+#
+# Define the Broadcast function for array broadcasting
 
 
 @function
@@ -517,16 +545,15 @@ if __name__ == "__main__":
     if IN_NOTEBOOK:
         eg.display(graphviz=True)
 
-
-# ### Define logic to match the shapes
+# ### Define Broadcasting Logic
 #
 # Two arrays can be broadcasted together when:
 #
 # - The corresponding dimensions are either the same or are both one.
-# - If number of dimensions mismatch, the lesser one gets new dimensions of shape 1 added to the left.
+# - If number of dimensions mismatch, the lesser one gets new dimensions of
+#   shape 1 added to the left.
 
 
-# +
 @function
 def ArrayAddDim(x: ArrayDesc, nd_diff: i64) -> ArrayDesc:
     "Creates a new ArrayDesc with `nd_diff` new dimension on the left."
@@ -681,9 +708,6 @@ def ruleset_broadcasting(
     ).then(delete(delme))
 
 
-# -
-
-
 # Here, we run the broadcasting rules and check the results:
 
 if __name__ == "__main__":
@@ -697,10 +721,10 @@ if __name__ == "__main__":
     eg.check(broadcasted.dim(2) == Dim.fixed(10))
     eg.check(broadcasted.dim(3) == Dim.fixed(4))
 
-
-# ## Broadcasting error
+# ## Broadcasting Error Detection
 #
-# Now, we add the logic to detect broadcasting error. Starting with a failing example:
+# Now, we add the logic to detect broadcasting error. Starting with a
+# failing example:
 
 if __name__ == "__main__":
     eg = EGraph()
@@ -733,13 +757,11 @@ if __name__ == "__main__":
     # Cannot determine dimension 1 of the broadcasted array
     assert len(eg.extract_multiple(broadcasted.dim(1), 10)) == 1
 
-
-# ### Define error handling logic
+# ### Define Error Handling Logic
 #
 # Broadcasting fails when the dimensions are mismatching and neither is one.
 
 
-# +
 @function
 def DimBroadcastFailed(dim: i64Like) -> Dim:
     "Mark the failed `dim`."
@@ -770,8 +792,6 @@ def ruleset_broadcasting_error(
     )
 
 
-# -
-
 if __name__ == "__main__":
     eg.run((ruleset_broadcasting | ruleset_broadcasting_error).saturate())
     if IN_NOTEBOOK:
@@ -781,15 +801,13 @@ if __name__ == "__main__":
     eg.check(broadcasted.dim(0) == Dim.fixed(10))
     eg.check(broadcasted.dim(1) == DimBroadcastFailed(1))
 
-
 # ### Implement CanBroadcast
 #
 # To implement `CanBroadcast` to determine whether a broadcasting is legal,
-# we'll need do Boolean expression. `CanBroadcast(x, y)` is checking each dimension
-# of `Broadcast(x, y)` to make sure they are valid `Dim`.
+# we'll need do Boolean expression. `CanBroadcast(x, y)` is checking each
+# dimension of `Broadcast(x, y)` to make sure they are valid `Dim`.
 
 
-# +
 class BoolExpr(Expr):
     def __init__(self, val: BoolLike): ...
     def __and__(self, other: BoolExpr) -> BoolExpr: ...

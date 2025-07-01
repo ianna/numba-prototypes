@@ -12,10 +12,18 @@
 #     name: python3
 # ---
 
-# ## Ch 4 Part 1. Fully typing a scalar function with if-else branch
+# # Chapter 4 Part 1: Fully Typing a Scalar Function with If-Else Branch
 #
-# We will consider control-flow constructs---the if-else branch. We went from
-# per-operation inference, to considering the entire function.
+# This chapter extends the type inference system to handle control-flow
+# constructs, specifically the if-else branch. We show how to implement
+# complete type inference for scalar functions with conditional logic.
+#
+# The chapter covers:
+# - How to implement type inference for if-else constructs
+# - How to handle type unification across branches
+# - How to extend the compiler pipeline for type inference
+
+# ## Imports and Setup
 
 
 from __future__ import annotations
@@ -25,7 +33,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from traceback import print_exception
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Sequence, TypedDict
 
 from egglog import (
     EGraph,
@@ -77,18 +85,29 @@ from sealir.eqsat.rvsdg_extract import (
     CostModel,
     EGraphToRVSDG,
     ExtractionError,
+    egraph_extraction,
 )
 from sealir.rvsdg import grammar as rg
 
+from ch02_egraph_basic import (
+    EGraphExtractionOutput,
+)
 from ch03_egraph_program_rewrites import (
-    frontend,
+    EGraphOutput,
+)
+from ch03_egraph_program_rewrites import (
+    compiler_pipeline as _ch03_compiler_pipeline,
+)
+from ch03_egraph_program_rewrites import (
+    egraph_saturation as _ch03_egraph_saturation,
+)
+from ch03_egraph_program_rewrites import (
     run_test,
 )
 from ch04_0_typeinfer_prelude import (
     basic_ruleset,
-    middle_end,
 )
-from utils import IN_NOTEBOOK
+from utils import IN_NOTEBOOK, Pipeline, Report, display
 
 _wc = wildcard
 
@@ -165,6 +184,7 @@ if __name__ == "__main__":
     eg.register(TypeFloat64)
     eg.register(TypeInt64 | TypeFloat64)
     eg.register(TypeInt64 | TypeFloat64 | TypeInt64)
+
     print("First run")
     eg.run(ruleset_type_basic)
     if IN_NOTEBOOK:
@@ -431,172 +451,167 @@ def ruleset_region_types(
 
 
 if __name__ == "__main__":
-    rvsdg_expr, dbginfo = frontend(example_0)
-    print(rvsdg.format_rvsdg(rvsdg_expr))
-
-    def define_egraph(
-        egraph: EGraph,
-        func: SExpr,
-    ):
-        egraph.let("root", GraphRoot(func))
-        rules = (
-            basic_ruleset
-            | ruleset_region_types
-            | ruleset_type_basic
-            | ruleset_type_infer_add
-            | setup_argtypes(TypeInt64, TypeInt64)
-        )
-        egraph.run(rules.saturate())
-        if IN_NOTEBOOK:
-            egraph.display(graphviz=True)
-
-        # Make sure the operation is in the graph
-        assert "Nb_Add_Int64" in str(egraph.extract(GraphRoot(func)))
-
-        raise AssertionError("stop early")
-
+    display(_ch03_compiler_pipeline.visualize())
+    rules = (
+        basic_ruleset
+        | ruleset_region_types
+        | ruleset_type_basic
+        | ruleset_type_infer_add
+        | setup_argtypes(TypeInt64, TypeInt64)
+    )
+    report = Report("Compiler Pipeline", default_expanded=True)
     try:
-        middle_end(
-            rvsdg_expr,
-            define_egraph,
-            converter_class=EGraphToRVSDG,
-            cost_model=None,
+        # this should raise a NotImplementedError because we haven't implemented
+        # the conversions of `Nb_Add_Int64` back into RVSDG.
+        cres = _ch03_compiler_pipeline(
+            fn=example_0, ruleset=rules, pipeline_report=report
         )
-    except AssertionError as e:
-        assert str(e) == "stop early"
+    except NotImplementedError as e:
+        # Expect the error to be raised because we haven't implemented the
+        # conversions of `Nb_Add_Int64` back into RVSDG.
+
+        # check __notes__ of the exception
+        for note in e.__notes__:
+            if "Nb_Add_Int64" in str(note):
+                print("Error note:")
+                print(note)
+                break
+        else:
+            assert False, "should not reach here"
+    else:
+        # an error should have been raised
+        assert False, "should not reach here"
+    finally:
+        report.display()
 
 
 # The above compilation have to stop early because we haven't implemented the
 # conversions of `Nb_Add_Int64` back into RVSDG.
 #
-# Observe:
+# Observe in the egraph:
 # - `Typedouts`, `TypedIns`, `Type.simple("Int64")`
 
 # ## Extend the rest of the compiler
 
 
-# + [markdown] jp-MarkdownHeadingCollapsed=true
 # ### A more extensible compiler pipeline
 # We'll need a more extensible compiler pipeline so capability can be added
 # later. The new pipeline also gained error checking base on whether there
 # is `ErrorMsg` in the egraph.
-# -
 
 
 class CompilationError(Exception):
     pass
 
 
-@dataclass
-class Compiler:
-    converter_class: Backend
-    backend: int
-    cost_model: CostModel
-    verbose: EGraphToRVSDG
+def egraph_saturation_with_error_checking(
+    egraph: EGraph,
+    egraph_root: GraphRoot,
+    ruleset: Ruleset,
+    pipeline_debug: bool = False,
+    pipeline_report=Report.Sink(),
+) -> EGraphOutput:
+    with pipeline_report.nest("Egraph Saturation") as report:
+        # Define graph root that points to the function
 
-    def run_frontend(self, fn):
-        rvsdg_expr, dbginfo = frontend(fn)
-        return rvsdg_expr, dbginfo
+        # Define the empty root node for the error messages
+        errors = ErrorMsg.root()
+        egraph.let("errors", errors)
+        if pipeline_debug:
+            report.append("[debug] initial egraph", egraph)
 
-    def run_middle_end(self, rvsdg_expr, ruleset):
+        # Run all the rules until saturation
+        egraph.run(ruleset.saturate())
 
-        # Middle end
-        def define_egraph(
-            egraph: EGraph,
-            func: SExpr,
-        ):
-            # Define graph root that points to the function
-            root = GraphRoot(func)
-            egraph.let("root", root)
-
-            # Define the empty root node for the error messages
-            errors = ErrorMsg.root()
-            egraph.let("errors", errors)
-
-            # Run all the rules until saturation
-            egraph.run(ruleset.saturate())
-
-            if self.verbose and IN_NOTEBOOK:
-                # For inspecting the egraph
-                egraph.display(graphviz=True)
-            print(egraph.extract(root))
-            # Use egglog's default extractor to get the error messages
-            errmsgs = map(
-                lambda x: x.eval(), egraph.extract_multiple(errors, n=10)
+        if pipeline_debug:
+            report.append("[debug] saturated egraph", egraph)
+            report.append(
+                "[debug] egglog.extract", egraph.extract(egraph_root)
             )
-            errmsgs_filtered = [
-                get_error_message((meth, args))
-                for meth, args in errmsgs
-                if meth != "root"
-            ]
-            if errmsgs_filtered:
-                # Raise CompilationError if there are compiler errors
-                raise CompilationError("\n".join(errmsgs_filtered))
 
+        # Use egglog's default extractor to get the error messages
+        errmsgs = map(
+            lambda x: x.eval(), egraph.extract_multiple(errors, n=10)
+        )
+        errmsgs_filtered = [
+            get_error_message((meth, args))
+            for meth, args in errmsgs
+            if meth != "root"
+        ]
+        if errmsgs_filtered:
+            # Raise CompilationError if there are compiler errors
+            raise CompilationError("\n".join(errmsgs_filtered))
+
+        return dict(egraph=egraph, egraph_root=egraph_root)
+
+
+def pipeline_egraph_extraction(
+    egraph,
+    rvsdg_expr,
+    converter_class,
+    cost_model,
+    pipeline_report=Report.Sink(),
+) -> EGraphExtractionOutput:
+    with pipeline_report.nest(
+        "EGraph Extraction", default_expanded=True
+    ) as report:
         try:
-            cost, extracted = middle_end(
+            # This is the same as ch4.1
+            cost, extracted = egraph_extraction(
+                egraph,
                 rvsdg_expr,
-                define_egraph,
-                converter_class=self.converter_class,
-                cost_model=self.cost_model,
+                converter_class=converter_class,
+                cost_model=cost_model,
             )
         except ExtractionError as e:
             raise CompilationError("extraction failed") from e
 
-        return cost, extracted
+        report.append("Extracted RVSDG", format_rvsdg(extracted))
+        report.append("Extracted cost", cost)
 
-    def run_backend(self, extracted, argtypes):
-        return self.backend.lower(extracted, argtypes)
-
-    def lower_py_fn(self, fn, argtypes, ruleset):
-
-        rvsdg_expr, dbginfo = self.run_frontend(fn)
-
-        print("Before EGraph".center(80, "="))
-        print(format_rvsdg(rvsdg_expr))
-
-        cost, extracted = self.run_middle_end(rvsdg_expr, ruleset)
-
-        print("Extracted from EGraph".center(80, "="))
-        print("cost =", cost)
-        print(format_rvsdg(extracted))
-
-        module = self.run_backend(extracted, argtypes)
-
-        if self.verbose:
-            print("LLVM module".center(80, "="))
-            print(module)
-
-        return module, extracted
-
-    def run_backend_passes(self, module):
-        self.backend.run_passes(module)
-
-    def compile_module(self, module, egraph_node, func_name="func"):
-        return self.backend.jit_compile(module, egraph_node, func_name)
-
-    def compile_module_(
-        self,
-        llmod,
-        input_types,
-        output_types,
-        function_name="func",
-        exec_engine=None,
-        **execution_engine_params,
-    ):
-        return self.backend.jit_compile_(
-            llmod,
-            input_types,
-            output_types,
-            function_name,
-            exec_engine,
-            **execution_engine_params,
-        )
+    return dict(cost=cost, extracted=extracted)
 
 
-# + [markdown] jp-MarkdownHeadingCollapsed=true
+pipeline_middle_end = (
+    _ch03_compiler_pipeline.trunc("egraph_saturation")
+    .extend(egraph_saturation_with_error_checking)
+    .extend(pipeline_egraph_extraction)
+)
+
+if __name__ == "__main__":
+    display(pipeline_middle_end.visualize())
+
+
+class BackendOutput(TypedDict):
+    module: Any
+
+
+@pipeline_middle_end.extend
+def pipeline_backend(
+    extracted, argtypes, backend, pipeline_report=Report.Sink()
+) -> BackendOutput:
+    with pipeline_report.nest("Backend") as report:
+        module = backend.lower(extracted, argtypes)
+        report.append("Lowered module", module)
+        return dict(module=module)
+
+
+class JitCompilerOutput(TypedDict):
+    jit_func: Any
+
+
+@pipeline_backend.extend
+def jit_compiler(
+    module, extracted, backend, export_func_name="func"
+) -> JitCompilerOutput:
+    jit_func = backend.jit_compile(module, extracted, export_func_name)
+    return dict(jit_func=jit_func)
+
+
+if __name__ == "__main__":
+    display(pipeline_backend.visualize())
+
 # ### Define EGraph functions for new operations:
-# -
 
 
 @function
@@ -690,9 +705,7 @@ def ruleset_type_infer_div(io: Term, x: Term, y: Term, op: Term):
     )
 
 
-# + [markdown] jp-MarkdownHeadingCollapsed=true
 # ### Rules for type-inference on if-else
-# -
 
 # Most of the logic is just propagation. The key is merging the type-variables
 # of all outputs.
@@ -778,7 +791,6 @@ def ruleset_propagate_typeof_ifelse(
 SExpr = rvsdg.grammar.SExpr
 
 
-# + [markdown] jp-MarkdownHeadingCollapsed=true
 # ### Extend RVSDG Grammar for the new operations
 
 
@@ -976,10 +988,8 @@ class ExtendEGraphToRVSDG(EGraphToRVSDG):
                 return super().handle_Term(op, children, grm)
 
 
-# + [markdown] jp-MarkdownHeadingCollapsed=true
 # ### Define cost model
 # penalize Python operations (`Py_` prefix)
-# -
 
 
 class MyCostModel(CostModel):
@@ -996,7 +1006,6 @@ class MyCostModel(CostModel):
         return super().get_cost_function(nodename, op, ty, cost, children)
 
 
-# + [markdown] jp-MarkdownHeadingCollapsed=true
 # ### Define Attributes
 
 
@@ -1054,7 +1063,9 @@ class Attributes:
             yield self._typedins[idx].type
 
 
-# + [markdown] jp-MarkdownHeadingCollapsed=true
+# -
+
+
 # ### Extend LLVM Backend for the new operations
 
 
@@ -1344,9 +1355,7 @@ base_ruleset = (
 )
 
 
-# + [markdown] jp-MarkdownHeadingCollapsed=true
 # ## Example 1: simple if-else
-# -
 
 
 def example_1(a, b):
@@ -1357,18 +1366,21 @@ def example_1(a, b):
     return z + a
 
 
-compiler = Compiler(
-    ExtendEGraphToRVSDG, Backend(), MyCostModel(), verbose=True
-)
-
 if __name__ == "__main__":
-    llvm_module, func_egraph = compiler.lower_py_fn(
-        example_1,
+    pipeline_report = Report(
+        "Pipeline execution report", enable_nested_metadata=True
+    )
+    jit_func = jit_compiler(
+        fn=example_1,
         argtypes=(Int64, Int64),
         ruleset=(base_ruleset | setup_argtypes(TypeInt64, TypeInt64)),
-    )
-
-    jit_func = compiler.compile_module(llvm_module, func_egraph)
+        converter_class=ExtendEGraphToRVSDG,
+        backend=Backend(),
+        cost_model=MyCostModel(),
+        pipeline_debug=True,
+        pipeline_report=pipeline_report,
+    ).jit_func
+    pipeline_report.display()
 
     args = (10, 33)
     run_test(example_1, jit_func, args, verbose=True)
@@ -1415,16 +1427,22 @@ def ruleset_type_infer_float(
 
 
 if __name__ == "__main__":
-    llvm_module, func_egraph = compiler.lower_py_fn(
-        example_2,
+    report = Report("Pipeline execution report")
+    cres = jit_compiler(
+        fn=example_2,
         argtypes=(Int64, Int64),
         ruleset=(
             base_ruleset
             | setup_argtypes(TypeInt64, TypeInt64)
             | ruleset_type_infer_float  # < --- added for float()
         ),
+        converter_class=ExtendEGraphToRVSDG,
+        backend=Backend(),
+        cost_model=MyCostModel(),
+        pipeline_debug=True,
+        pipeline_report=report,
     )
-    jit_func = compiler.compile_module(llvm_module, func_egraph)
+    jit_func = cres.jit_func
     args = (10, 33)
     run_test(example_2, jit_func, args, verbose=True)
     args = (7, 3)
@@ -1456,9 +1474,10 @@ def ruleset_failed_to_unify(ty: Type):
 
 
 if __name__ == "__main__":
+    report = Report("Pipeline execution report")
     try:
-        llvm_module, func_egraph = compiler.lower_py_fn(
-            example_3,
+        jit_compiler(
+            fn=example_3,
             argtypes=(Int64, Int64),
             ruleset=(
                 base_ruleset
@@ -1466,12 +1485,20 @@ if __name__ == "__main__":
                 | ruleset_type_infer_float
                 | ruleset_failed_to_unify
             ),
+            converter_class=ExtendEGraphToRVSDG,
+            backend=Backend(),
+            cost_model=MyCostModel(),
+            pipeline_debug=True,
+            pipeline_report=report,
         )
     except CompilationError as e:
         # Compilation failed because the return type cannot be determined.
         # This indicates that the type inference is incomplete
         print_exception(e)
         assert "fail to unify" in str(e)
+    finally:
+        report.display()
+
 
 # ## Example 4: Improve error reporting
 #
@@ -1510,10 +1537,10 @@ def ruleset_type_infer_failure_report(
 
 
 if __name__ == "__main__":
-
+    report = Report("Pipeline execution report")
     try:
-        llvm_module, func_egraph = compiler.lower_py_fn(
-            example_3,
+        jit_compiler(
+            fn=example_3,
             argtypes=(Int64, Int64),
             ruleset=(
                 base_ruleset
@@ -1522,8 +1549,15 @@ if __name__ == "__main__":
                 | ruleset_failed_to_unify
                 | ruleset_type_infer_failure_report
             ),
+            converter_class=ExtendEGraphToRVSDG,
+            backend=Backend(),
+            cost_model=MyCostModel(),
+            pipeline_debug=True,
+            pipeline_report=report,
         )
 
     except CompilationError as e:
         print_exception(e)
         assert "Failed to unify if-else outgoing variables: z" in str(e)
+    finally:
+        report.display()

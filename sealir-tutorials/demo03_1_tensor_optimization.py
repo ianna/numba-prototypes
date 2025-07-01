@@ -1,3 +1,32 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: light
+#       format_version: '1.5'
+#       jupytext_version: 1.16.7
+#   kernelspec:
+#     display_name: Python 3 (ipykernel)
+#     language: python
+#     name: python3
+# ---
+
+# # Demo 3.1: Advanced Matrix Algebra Rewrites and E-Graph Optimization
+#
+# This demo notebook explores advanced algebraic rewrites for matrix
+# multiplication and addition, using e-graphs and cost-based extraction. We
+# demonstrate how distributive and concatenation rules can be encoded and
+# optimized, and how the resulting computation can be extracted and compared to
+# hand-optimized and original versions.
+#
+# The notebook demonstrates:
+# - How to encode distributive and concatenation rules for matrix algebra
+# - How to use e-graphs to optimize and extract efficient computation
+# - How to compare the results and performance of different approaches
+
+# ## Imports and Setup
+
 import numpy as np
 from egglog import (
     EGraph,
@@ -25,7 +54,6 @@ from sealir.eqsat.rvsdg_extract import (
 )
 from sealir.rvsdg import format_rvsdg
 
-from ch01_basic_compiler import frontend
 from ch04_1_typeinfer_ifelse import TypeFloat64
 from ch05_typeinfer_array import (
     ArrayDesc,
@@ -50,6 +78,7 @@ from demo01_gelu_tanh_approx import (
 )
 from demo03_0_matmul_assoc import (
     ArrayDescOp,
+    ExtractedOutput,
 )
 from demo03_0_matmul_assoc import MatMul as Npy_MatMul
 from demo03_0_matmul_assoc import (
@@ -60,42 +89,55 @@ from demo03_0_matmul_assoc import (
 )
 from demo03_0_matmul_assoc import SourceMaker as _demo03_0_SourceMaker
 from demo03_0_matmul_assoc import (
+    compiler,
+    pipeline_to_egraph,
+    ruleset_matmul_op,
     ruleset_optimize_matmul,
 )
+from utils import Pipeline, Report, display, visualize_expr_tree
 
-# --- Original version ---
+# ## Original and Optimized Matrix Multiplication Functions
+#
+# Define the original and hand-optimized versions of a matrix multiplication
+# expression involving addition and concatenation.
+
+# ### Original version
 # Two separate matmuls followed by elementwise add
 
 
 def original_mma(input_1, input_2, input_3, input_4):
-    out1 = np.matmul(input_1, input_3)
-    out2 = np.matmul(input_2, input_4)
-    return out1 + out2
+    return input_1 @ (input_2 + input_3) @ input_4
 
 
-# --- Optimized version ---
+# ### Optimized version
 # Concatenate inputs along feature dimensions
 
 
 def optimized_mma(input_1, input_2, input_3, input_4):
-    concat_input = np.hstack([input_1, input_2])
-    concat_weight = np.vstack([input_3, input_4])
-    return np.matmul(concat_input, concat_weight)
+    #    input_1 @ (input_2, input_3)
+    # => input_1 @ input_2 + input_1 @ input_3
+    # => hstack(input_1, input_1) + vstack(input_2, input_3)
+    concat_input = np.hstack([input_1, input_1])
+    concat_weight = np.vstack([input_2, input_3])
+    return concat_input @ concat_weight @ input_4
 
 
-M = 1024
-N = 256
-K = 256
+M = 1000
+N = 10
+K = 100
 
+# ## Compare Original and Optimized Results
+#
+# Run both versions on random inputs and compare their outputs for correctness.
 
 if __name__ == "__main__":
     # Set seed for reproducibility
     np.random.seed(0)
 
     input_1 = np.random.randn(M, N)
-    input_2 = np.random.randn(M, N)
+    input_2 = np.random.randn(N, K)
     input_3 = np.random.randn(N, K)
-    input_4 = np.random.randn(N, K)
+    input_4 = np.random.randn(K, 2)
 
     original = original_mma(input_1, input_2, input_3, input_4)
     optimized = optimized_mma(input_1, input_2, input_3, input_4)
@@ -103,8 +145,11 @@ if __name__ == "__main__":
     print("Max absolute difference:", np.max(np.abs(original - optimized)))
     print("Are they close?", np.allclose(original, optimized, atol=1e-6))
 
-
-# ===============================
+# ## E-Graph Rules for NumPy and Matrix Algebra
+#
+# Define rulesets for NumPy module, addition, distributive, and concatenation
+# rewrites, enabling the e-graph to represent and optimize advanced matrix
+# algebra expressions.
 
 
 @ruleset
@@ -163,15 +208,32 @@ def ruleset_numpy_add(
     ).then(set_(TypeVar(aryres).getType()).to(Broadcast(ad0, ad1).toType()))
 
 
+# ### Tensat rules
+#
+# Define rulesets from TASO/TENSAT
+
+
 @ruleset
 def ruleset_tensat(ary1: Term, ary2: Term, ary3: Term, ary4: Term):
     ewadd = Npy_Add
     matmul = Npy_MatMul
     hstack = Npy_HStack
     vstack = Npy_VStack
+    # tensat rule
+    # (A @ B) + (C @ D) => (A, C) @ (B, D)
     yield rewrite(
         ewadd(matmul(ary1, ary3), matmul(ary2, ary4)),
     ).to(matmul(hstack(ary1, ary2), vstack(ary3, ary4)))
+
+    # distributive
+    # A @ (B + C) => A @ B + A @ C
+    yield rewrite(matmul(ary1, ewadd(ary2, ary3))).to(
+        ewadd(matmul(ary1, ary2), matmul(ary1, ary3)),
+    )
+    # (B + C) @ A => B @ A + C @ A
+    yield rewrite(matmul(ewadd(ary2, ary3), ary1)).to(
+        ewadd(matmul(ary2, ary1), matmul(ary3, ary1)),
+    )
 
 
 @ruleset
@@ -194,7 +256,9 @@ def ruleset_specialize_numpy(
         ad0.ndim == i64(2),
         Dim.fixed(shapeM) == ad0.dim(0),
         Dim.fixed(shapeN) == ad0.dim(1),
-    ).then(union(ary3).with_(Npy_Add_KnownShape(ary1, ary2, shapeM * shapeN)))
+    ).then(
+        union(ary3).with_(Npy_Add_KnownShape(ary1, ary2, shapeM * shapeN)),
+    )
 
     # HSTACK
     yield rule(
@@ -244,6 +308,7 @@ def ruleset_specialize_numpy(
     )
 
 
+# +
 @function
 def Npy_Add(lhs: Term, rhs: Term) -> Term: ...
 
@@ -268,7 +333,12 @@ def Npy_VStack(lhs: Term, rhs: Term) -> Term: ...
 def Npy_VStack_KnownShape(lhs: Term, rhs: Term, m: i64, n: i64) -> Term: ...
 
 
-# ===============================
+# -
+
+# ## Cost Model
+#
+# Define a cost model that assigns costs to different matrix operations,
+# encouraging the optimizer to prefer efficient rewrites.
 
 
 class MyCostModel(_ch05_CostModel):
@@ -303,7 +373,10 @@ class MyCostModel(_ch05_CostModel):
         return super().get_cost_function(nodename, op, ty, cost, children)
 
 
-# ===============================
+# ## RVSDG Grammar Extensions for Matrix Operations
+#
+# Extend the RVSDG grammar to represent the new matrix operations and their
+# optimized forms.
 
 
 class NbOp_Npy_MatMul(NbOp_Base):
@@ -352,14 +425,6 @@ class MyEGraphToRVSDG(ExtendEGraphToRVSDG):
 
     def handle_Term(self, op: str, children: dict | list, grm: Grammar):
         match op, children:
-            # case "Npy_Add", {"lhs": lhs, "rhs": rhs}:
-            #     return grm.write(NbOp_Npy_Add(lhs=lhs, rhs=rhs))
-
-            # case "Npy_HStack", {"lhs": lhs, "rhs": rhs}:
-            #     return grm.write(NbOp_Npy_HStack(lhs=lhs, rhs=rhs))
-
-            # case "Npy_VStack", {"lhs": lhs, "rhs": rhs}:
-            #     return grm.write(NbOp_Npy_VStack(lhs=lhs, rhs=rhs))
 
             case "Npy_HStack_KnownShape", {
                 "lhs": lhs,
@@ -404,7 +469,10 @@ class MyEGraphToRVSDG(ExtendEGraphToRVSDG):
         return super().handle_Term(op, children, grm)
 
 
-# ===============================
+# ## E-Graph Pipeline and Extraction
+#
+# Run the e-graph pipeline, extract the optimized computation, and compare the
+# result to the original and hand-optimized versions.
 
 array_0_desc, array_0_infos = array_desc_rules(
     "array_0", shape=(M, N), dtype=TypeFloat64, layout="c"
@@ -412,42 +480,27 @@ array_0_desc, array_0_infos = array_desc_rules(
 array_1_desc, array_1_infos = array_desc_rules(
     "array_1", shape=(N, K), dtype=TypeFloat64, layout="c"
 )
-ruleset_array_facts = ruleset(*array_0_infos, *array_1_infos)
+array_2_desc, array_2_infos = array_desc_rules(
+    "array_2", shape=(K, 2), dtype=TypeFloat64, layout="c"
+)
+ruleset_array_facts = ruleset(*array_0_infos, *array_1_infos, *array_2_infos)
 
-
-if __name__ == "__main__":
-    rvsdg_expr, _dbginfo = frontend(original_mma)
-    print(format_rvsdg(rvsdg_expr))
-    memo = egraph_conversion(rvsdg_expr)
-    root = GraphRoot(memo[rvsdg_expr])
-    eg = EGraph()
-    eg.let("root", root)
-    eg.run(
-        (
-            ruleset_array_facts
-            | setup_argtypes(
-                array_0_desc.toType(),
-                array_0_desc.toType(),
-                array_1_desc.toType(),
-                array_1_desc.toType(),
-            )
-            | base_ruleset
-            | ruleset_module
-            | facts_numpy_module
-            | ruleset_numpy_add
-            | ruleset_broadcasting
-            | ruleset_optimize_matmul
-            | ruleset_tensat
-            | ruleset_specialize_numpy
-        ).saturate()
-    )
-    cost, out_expr = egraph_extraction(
-        egraph=eg,
-        rvsdg_sexpr=rvsdg_expr,
-        cost_model=MyCostModel(),
-        converter_class=MyEGraphToRVSDG,
-    )
-    print(format_rvsdg(out_expr))
+argtypes = (
+    array_0_desc.toType(),
+    array_1_desc.toType(),
+    array_1_desc.toType(),
+    array_2_desc.toType(),
+)
+extra_ruleset = (
+    ruleset_module
+    | facts_numpy_module
+    | ruleset_numpy_add
+    | ruleset_broadcasting
+    | ruleset_matmul_op
+    | ruleset_optimize_matmul
+    | ruleset_tensat
+    | ruleset_specialize_numpy
+)
 
 
 class SourceMaker(_demo03_0_SourceMaker):
@@ -467,14 +520,45 @@ class SourceMaker(_demo03_0_SourceMaker):
                 return super().visit(expr)
 
 
-if __name__ == "__main__":
-    visitor = SourceMaker()
-    outports = out_expr.body.ports
-    [out_equ] = [p.value for p in outports if p.name == "!ret"]
-    ase.apply_bottomup(out_equ, visitor)
+# ## Run the E-Graph Pipeline
+#
+# Run the e-graph pipeline, extract the optimized computation, and compare the
+# result to the original and hand-optimized versions.
 
-    print(visitor.get_source())
-    extracted = visitor.get_function(global_ns={"np": np})
+if __name__ == "__main__":
+    display(compiler.visualize())
+    report = Report("Pipeline execution report", default_expanded=True)
+    cres = compiler(
+        fn=original_mma,
+        argtypes=argtypes,
+        extra_ruleset=extra_ruleset,
+        arg_facts=ruleset_array_facts,
+        global_ns={"np": np},
+        animate=True,
+        pipeline_report=report,
+        pipeline_debug=True,
+        cost_model=MyCostModel(),
+        converter_class=MyEGraphToRVSDG,
+        sourcemaker_class=SourceMaker,
+    )
+    report.display()
+    report = Report(
+        "Expression tree of different versions", default_expanded=True
+    )
+    report.append("Original", visualize_expr_tree(original_mma))
+    report.append("Hand-optimized", visualize_expr_tree(optimized_mma))
+    report.append("Optimized", visualize_expr_tree(cres.extracted))
+    report.display()
+
+    extracted = cres.extracted
+
+    import json
+
+    steps = []
+    for step in cres.saturation_steps:
+        steps.append(json.loads(step))
+    with open("jsanimate.json", "w") as fout:
+        json.dump({"steps": steps}, fout)
 
     got = extracted(input_1, input_2, input_3, input_4)
     np.testing.assert_allclose(original, got)
