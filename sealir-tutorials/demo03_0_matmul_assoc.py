@@ -84,7 +84,7 @@ from utils import Pipeline, Report, display, visualize_expr_tree
 
 SExpr = ase.SExpr
 
-# ## NumPy Example: Three Matrix Multiplications
+# ## NumPy Example: Two Matrix Multiplications
 #
 # We start by showing that the result of matrix multiplication is associative,
 # but the performance can differ depending on the order of operations.
