@@ -11,24 +11,14 @@ def test_ch04_0_autotest():
 
 
 def check(fn, ruleset):
-    rvsdg_expr, dbginfo = frontend(fn)
-
-    memo = egraph_conversion(rvsdg_expr)
-
-    func = memo[rvsdg_expr]
-
-    egraph = EGraph()
-    root = GraphRoot(func)
-    egraph.let("root", root)
-    egraph.run(ruleset.saturate())
-
-    cost, extracted = egraph_extraction(
-        egraph,
-        rvsdg_expr,
+    cres = pipeline_backend(
+        fn=fn,
+        ruleset=ruleset,
         converter_class=ExtendEGraphToRVSDG,
         cost_model=MyCostModel(),
+        codegen_extension=codegen_extension,
     )
-    return extracted
+    return cres.extracted
 
 
 def test_ch04_0_code_functioning():
@@ -36,12 +26,12 @@ def test_ch04_0_code_functioning():
     Test the final code that uses everything
     """
     jt = compiler_pipeline(
-        chained_additions,
+        fn=chained_additions,
         ruleset=optimized_ruleset,
         converter_class=ExtendEGraphToRVSDG,
         codegen_extension=codegen_extension,
         cost_model=MyCostModel(),
-    )
+    ).jit_func
     run_test(chained_additions, jt, (321, 4535))
 
 

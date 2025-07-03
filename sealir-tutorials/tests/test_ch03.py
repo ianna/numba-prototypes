@@ -23,22 +23,11 @@ def test_ch03_ifelse_fold_internal():
             return b
 
     def check(fn, ruleset):
-        rvsdg_expr, dbginfo = frontend(fn)
-
-        memo = egraph_conversion(rvsdg_expr)
-
-        func = memo[rvsdg_expr]
-
-        egraph = EGraph()
-        root = GraphRoot(func)
-        egraph.let("root", root)
-        egraph.run(ruleset.saturate())
-
-        cost, extracted = egraph_extraction(egraph, rvsdg_expr)
+        cres = compiler_pipeline(fn=fn, ruleset=ruleset)
         return [
             cur
             for ps, cur in ase.walk_descendants_depth_first_no_repeat(
-                extracted
+                cres.extracted
             )
             if is_if_else(cur)
         ]

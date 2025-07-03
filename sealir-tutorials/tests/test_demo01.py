@@ -1,24 +1,31 @@
+import demo01_gelu_tanh_approx
 from demo01_gelu_tanh_approx import *
+
+from .autotests import autotest_notebook
+
+
+def test_demo01_autotest():
+    autotest_notebook(demo01_gelu_tanh_approx)
 
 
 def test_demo01_baseline():
-    llvm_module, func_egraph = compiler.lower_py_fn(
-        gelu_tanh_forward,
+    cres = jit_compiler(
+        fn=gelu_tanh_forward,
         argtypes=(Float32,),
         ruleset=(
             base_ruleset | setup_argtypes(TypeFloat32) | additional_rules
         ),
+        **compiler_config
     )
-    compiler.run_backend_passes(llvm_module)
-    jt = compiler.compile_module(llvm_module, func_egraph)
-
+    llvm_module = cres.module
+    jt = cres.jit_func
     assert "llvm.call @tanhf" in str(llvm_module)
     run_test(gelu_tanh_forward, jt, (0.234,))
 
 
 def test_demo01_optimized():
-    llvm_module, func_egraph = compiler.lower_py_fn(
-        gelu_tanh_forward,
+    cres = jit_compiler(
+        fn=gelu_tanh_forward,
         argtypes=(Float32,),
         ruleset=(
             base_ruleset
@@ -26,10 +33,10 @@ def test_demo01_optimized():
             | additional_rules
             | optimize_rules
         ),
+        **compiler_config
     )
-    compiler.run_backend_passes(llvm_module)
-    jt = compiler.compile_module(llvm_module, func_egraph)
-
+    llvm_module = cres.module
+    jt = cres.jit_func
     # tanhf not used
     assert "llvm.call @tanhf" not in str(llvm_module)
     # powf not used

@@ -7,19 +7,23 @@
 #       format_version: '1.5'
 #       jupytext_version: 1.16.7
 #   kernelspec:
-#     display_name: sealir_basic_compiler
+#     display_name: Python 3 (ipykernel)
 #     language: python
 #     name: python3
 # ---
 
-# ## Ch 4 Part 0. Type inference for scalar operations.
+# # Chapter 4 Part 0: Type Inference Prelude
 #
-# In this chapter, we'll add type inference logic into the EGraph middle-end.
-# This chapter is divided into several parts that grows in complexity.
-# Here, in part 0, we will introduce a simple type inference logic that convert
-# each scalar operations at a time from Python objects into machine typed
-# operations.
+# This chapter introduces the basics of type inference in the compiler
+# pipeline. We show how to add type inference logic for scalar operations
+# and how to extend the compiler pipeline to support type-aware rewrites.
+#
+# The chapter covers:
+# - How to represent types in the e-graph
+# - How to add type inference rules for basic operations
+# - How to extend the compiler pipeline for type inference
 
+# ## Imports and Setup
 
 from egglog import (
     EGraph,
@@ -44,14 +48,21 @@ from sealir.eqsat.rvsdg_extract import (
 )
 from sealir.llvm_pyapi_backend import SSAValue
 
-from ch03_egraph_program_rewrites import (
+from ch02_egraph_basic import (
+    BackendOutput,
+    EGraphExtractionOutput,
     backend,
-    frontend,
     jit_compile,
+    pipeline_egraph_extraction,
+)
+from ch03_egraph_program_rewrites import (
+    compiler_pipeline as _ch03_compiler_pipeline,
+)
+from ch03_egraph_program_rewrites import (
     ruleset_const_propagate,
     run_test,
 )
-from utils import IN_NOTEBOOK
+from utils import IN_NOTEBOOK, Report, display
 
 # First, we need some modifications to the compiler-pipeline.
 # The middle-end is augmented with the following:
@@ -61,66 +72,54 @@ from utils import IN_NOTEBOOK
 # - `cost_model` is for customizing the cost of the new operations.
 
 
-def middle_end(rvsdg_expr, apply_to_egraph, converter_class, cost_model):
-    # Convert to egraph
-    memo = egraph_conversion(rvsdg_expr)
+def pipeline_egraph_extraction(
+    egraph,
+    rvsdg_expr,
+    converter_class,
+    cost_model,
+    pipeline_report=Report.Sink(),
+) -> EGraphExtractionOutput:
+    with pipeline_report.nest(
+        "EGraph Extraction", default_expanded=True
+    ) as report:
+        cost, extracted = egraph_extraction(
+            egraph,
+            rvsdg_expr,
+            converter_class=converter_class,  # <---- new
+            cost_model=cost_model,  # <-------------- new
+        )
+        report.append("Cost", cost)
+        report.append("Extracted", rvsdg.format_rvsdg(extracted))
+        return {"cost": cost, "extracted": extracted}
 
-    func = memo[rvsdg_expr]
 
-    egraph = EGraph()
-    apply_to_egraph(egraph, func)
-
-    # Extraction
-    cost, extracted = egraph_extraction(
-        egraph,
-        rvsdg_expr,
-        converter_class=converter_class,  # <---- new
-        cost_model=cost_model,  # <---- new
-    )
-    return cost, extracted
-
+pipeline_new_extract = _ch03_compiler_pipeline.replace(
+    "pipeline_egraph_extraction", pipeline_egraph_extraction
+)
 
 # The compiler_pipeline will have a `codegen_extension` for defining LLVM
 # code-generation for the new operations.
 
 
-def compiler_pipeline(
-    fn,
-    *,
-    verbose=False,
-    ruleset,
-    converter_class=EGraphToRVSDG,
-    codegen_extension=None,
-    cost_model=None,
-):
-    rvsdg_expr, dbginfo = frontend(fn)
+def extended_backend(
+    extracted, codegen_extension, pipeline_report=Report.Sink()
+) -> BackendOutput:
+    with pipeline_report.nest("Backend", default_expanded=True) as report:
+        llmod = backend(extracted, codegen_extension=codegen_extension)
+        report.append("LLVM", llmod)
+        jt = jit_compile(llmod, extracted)
+        return {"jit_func": jt, "llmod": llmod}
 
-    # Middle end
-    def define_egraph(egraph: EGraph, func):
-        root = GraphRoot(func)
-        egraph.let("root", root)
 
-        egraph.run(ruleset.saturate())
-        if verbose and IN_NOTEBOOK:
-            # For inspecting the egraph
-            egraph.display(graphviz=True)
+# extend the pipeline with the new backend
+pipeline_backend = pipeline_new_extract.replace(
+    "pipeline_backend", extended_backend
+)
+compiler_pipeline = pipeline_backend
 
-    cost, extracted = middle_end(
-        rvsdg_expr,
-        define_egraph,
-        converter_class=converter_class,
-        cost_model=cost_model,
-    )
-    print("Extracted from EGraph".center(80, "="))
-    print("cost =", cost)
-    print(rvsdg.format_rvsdg(extracted))
-
-    llmod = backend(extracted, codegen_extension=codegen_extension)
-    if verbose:
-        print("LLVM module".center(80, "="))
-        print(llmod)
-    return jit_compile(llmod, extracted)
-
+# visualize the pipeline
+if __name__ == "__main__":
+    display(compiler_pipeline.visualize())
 
 # ## A Simple Type Inference Example
 
@@ -141,7 +140,16 @@ basic_ruleset = rvsdg_eqsat.ruleset_rvsdg_basic | ruleset_const_propagate
 
 if __name__ == "__main__":
     # start with previous compiler pipeline
-    jt = compiler_pipeline(add_x_y, ruleset=basic_ruleset, verbose=True)
+    report = Report("Compiler Pipeline", default_expanded=True)
+    jt = compiler_pipeline(
+        fn=add_x_y,
+        ruleset=basic_ruleset,
+        converter_class=EGraphToRVSDG,
+        codegen_extension=None,
+        cost_model=None,
+        pipeline_report=report,
+    ).jit_func
+    report.display()
     run_test(add_x_y, jt, (123, 321), verbose=True)
 
 
@@ -341,15 +349,16 @@ typeinfer_ruleset = (
 # We are now ready to run the compiler:
 
 if __name__ == "__main__":
+    report = Report("Compiler Pipeline", default_expanded=True)
     jt = compiler_pipeline(
-        add_x_y,
+        fn=add_x_y,
         ruleset=typeinfer_ruleset,
-        verbose=True,
         converter_class=ExtendEGraphToRVSDG,
         codegen_extension=codegen_extension,
         cost_model=MyCostModel(),
-    )
-    res = jt(123, 321)
+        pipeline_report=report,
+    ).jit_func
+    report.display()
     run_test(add_x_y, jt, (123, 321), verbose=True)
 
 
@@ -375,15 +384,15 @@ def chained_additions(x, y):
 
 
 if __name__ == "__main__":
+    report = Report("Compiler Pipeline", default_expanded=True)
     jt = compiler_pipeline(
-        chained_additions,
+        fn=chained_additions,
         ruleset=typeinfer_ruleset,
-        verbose=True,
         converter_class=ExtendEGraphToRVSDG,
         codegen_extension=codegen_extension,
         cost_model=MyCostModel(),
-    )
-    res = jt(123, 321)
+    ).jit_func
+    report.display()
     run_test(chained_additions, jt, (123, 321), verbose=True)
 
 # Observations:
@@ -414,16 +423,16 @@ def ruleset_optimize_boxing(x: Term):
 optimized_ruleset = typeinfer_ruleset | ruleset_optimize_boxing
 
 if __name__ == "__main__":
-
+    report = Report("Compiler Pipeline", default_expanded=True)
     jt = compiler_pipeline(
-        chained_additions,
+        fn=chained_additions,
         ruleset=optimized_ruleset,
-        verbose=True,
         converter_class=ExtendEGraphToRVSDG,
         codegen_extension=codegen_extension,
         cost_model=MyCostModel(),
-    )
-    res = jt(123, 321)
+        pipeline_report=report,
+    ).jit_func
+    report.display()
     run_test(chained_additions, jt, (123, 321), verbose=True)
 
 # Observations:
