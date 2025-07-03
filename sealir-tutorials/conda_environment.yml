@@ -10,12 +10,14 @@ dependencies:
   - pytest
   - networkx
   - numpy
+  - numba
   - nbconvert
   - ipykernel
   - jupyter
   - jupytext
   - make
   - graphviz
+  - pygraphviz
   - pip
   - pip:
     - egglog

@@ -37,6 +37,11 @@ jobs:
           activate-environment: sealir_tutorial
           environment-file: sealir-tutorials/conda_environment.yml
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y graphviz-dev
+
       - name: Render notebooks
         run: |
           source $CONDA/bin/activate
