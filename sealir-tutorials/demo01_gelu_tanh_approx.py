@@ -469,7 +469,6 @@ compiler_config = dict(
     converter_class=ExtendEGraphToRVSDG,
     backend=Backend(),
     cost_model=MyCostModel(),
-    verbose=True,
 )
 
 if __name__ == "__main__":
@@ -598,7 +597,7 @@ if __name__ == "__main__":
         input_type=Float32,
         ndim=1,
         compiler_config={**compiler_config, "pipeline_report": report},
-        extra_ruleset=additional_rules,
+        extra_ruleset=additional_rules | optimize_rules,
     )(gelu_tanh_forward)
     report.display()
     relclose = lambda x, y: np.allclose(x, y, rtol=1e-6)
@@ -611,3 +610,14 @@ if __name__ == "__main__":
         equal=relclose,
         verbose=True,
     )
+
+# ## Benchmark
+
+if __name__ == "__main__":
+    input_val = np.random.random(300000).astype(np.float32)
+    out = np.zeros_like(input_val)
+
+    print("original")
+    # %timeit gelu_tanh_forward(input_val)
+    print("superoptimized")
+    # %timeit vectorized_gelu(input_val, out=out)
