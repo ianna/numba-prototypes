@@ -10,7 +10,8 @@
 PY_FILES := $(wildcard ch[0-9]*.py) $(wildcard demo[0-9]*.py) index.py
 IPYNB_FILES := $(patsubst %.py,%.ipynb,$(PY_FILES))
 PAGES_SUBDIR := ../pages/sealir_tutorials
-HTML_FILES := $(patsubst %.ipynb,$(PAGES_SUBDIR)/%.html,$(IPYNB_FILES))
+PRE_RENDERED_HTML_FILES := $(wildcard *.pre_rendered.html)
+HTML_FILES := $(patsubst %.ipynb,$(PAGES_SUBDIR)/%.html,$(IPYNB_FILES)) $(patsubst %.pre_rendered.html,$(PAGES_SUBDIR)/%.pre_rendered.html,$(PRE_RENDERED_HTML_FILES))
 
 # Default target to build all notebooks
 all: $(IPYNB_FILES)
@@ -41,6 +42,10 @@ $(PAGES_SUBDIR):
 # Pattern rule to convert .ipynb files to rendered .html
 $(PAGES_SUBDIR)/%.html: %.ipynb
 	jupyter nbconvert --execute --to html  --HTMLExporter.theme=dark --output=$@ $<
+
+# Pattern rule to copy pre-rendered .html files
+$(PAGES_SUBDIR)/%.pre_rendered.html: %.pre_rendered.html
+	cp $< $@
 
 # Clean target to remove generated notebooks and rendered HTML
 clean:

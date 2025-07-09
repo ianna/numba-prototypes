@@ -36,7 +36,7 @@
 #
 # ## Demos
 # * [Demo 1 - GELU tanh approximation](demo01_gelu_tanh_approx.html)
-# * [Demo 2 - GELU tanh approximation CUDA offload](demo02_cuda_ufunc.html)
+# * [Demo 2 - GELU tanh approximation CUDA offload](demo02_cuda_ufunc.html) ([pre-rendered](demo02.pre_rendered.html))
 # * [Demo 3.0 - Matrix Multiplication Associativity](demo03_0_matmul_assoc.html)
 # * [Demo 3.1 - Tensor Optimization](demo03_1_tensor_optimization.html)
 # * Demo 4: Energy Efficient GEMMs
