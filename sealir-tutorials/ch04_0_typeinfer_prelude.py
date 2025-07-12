@@ -391,6 +391,7 @@ if __name__ == "__main__":
         converter_class=ExtendEGraphToRVSDG,
         codegen_extension=codegen_extension,
         cost_model=MyCostModel(),
+        pipeline_report=report,
     ).jit_func
     report.display()
     run_test(chained_additions, jt, (123, 321), verbose=True)
